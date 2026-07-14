@@ -1,12 +1,11 @@
-//! By convention, root.zig is the root source file when making a package.
 const std = @import("std");
-const Io = std.Io;
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
+pub const core = @import("core.zig");
+
+/// Run the terminal editor shell for the given file path.
+pub fn run(allocator: std.mem.Allocator, io: std.Io, filename: []const u8) !void {
+    const shell = @import("shell.zig");
+    try shell.run(allocator, io, filename);
 }
 
 pub fn add(a: i32, b: i32) i32 {
