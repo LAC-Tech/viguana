@@ -5,21 +5,17 @@ const testing = std.testing;
 
 const File = @import("file.zig");
 
-pub const Pos = struct { row: usize, col: usize };
+const Pos = struct { row: usize, col: usize };
 
 pub const Size = struct { width: usize, height: usize };
 
-pub const Mode = enum { normal, insert, command };
+const Mode = enum { normal, insert, command };
 
 pub const Effect = union(enum) { quit, save, message: []const u8 };
 
-pub const UndoEntry = struct {
+const UndoEntry = struct {
     text: []const u8,
     cursor: Pos,
-
-    pub fn deinit(self: *UndoEntry, allocator: mem.Allocator) void {
-        allocator.free(self.text);
-    }
 };
 
 pub const Editor = struct {
@@ -72,9 +68,6 @@ pub const Editor = struct {
         self.file.deinit(allocator);
         allocator.free(self.filename);
         self.command.deinit(allocator);
-        for (self.undo_stack.items) |*entry| {
-            entry.deinit(allocator);
-        }
         self.undo_stack.deinit(allocator);
     }
 
@@ -128,13 +121,12 @@ pub const Editor = struct {
 
     fn restoreUndo(self: *Editor, allocator: mem.Allocator) !void {
         if (self.undo_stack.items.len == 0) return;
-        var entry = self.undo_stack.pop() orelse return;
+        const entry = self.undo_stack.pop() orelse return;
         self.file.deinit(allocator);
         self.file = try File.init(allocator, entry.text);
         self.cursor = entry.cursor;
         self.dirty = true;
         self.saved_for_undo = false;
-        entry.deinit(allocator);
         self.clampCursor();
         self.ensureCursorVisible();
     }

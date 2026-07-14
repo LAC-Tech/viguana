@@ -20,24 +20,21 @@ original_buf: []const u8,
 add_buf: ArrayList(u8),
 piece_tbl: ArrayList(Piece),
 
-pub fn init(allocator: mem.Allocator, original: []const u8) !@This() {
-    // TODO: why are we duping here?
-    const owned_original = try allocator.dupe(u8, original);
+pub fn init(allocator: mem.Allocator, original_buf: []const u8) !@This() {
     var pieces = ArrayList(Piece).empty;
     try pieces.append(allocator, .{
         .buf_type = .original,
         .start = 0,
-        .len = original.len,
+        .len = original_buf.len,
     });
     return .{
-        .original_buf = owned_original,
+        .original_buf = original_buf,
         .add_buf = .empty,
         .piece_tbl = pieces,
     };
 }
 
 pub fn deinit(self: *@This(), allocator: mem.Allocator) void {
-    allocator.free(self.original_buf);
     self.add_buf.deinit(allocator);
     self.piece_tbl.deinit(allocator);
 }
