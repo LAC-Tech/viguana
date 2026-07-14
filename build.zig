@@ -1,3 +1,25 @@
+//! Notes for myself as I always forget how zig building works.
+//!
+//! = CONCEPTS
+//!
+//! Module:
+//! Unit of compilation; contains "root" source file (like index.js in ESM)
+//!
+//! Step:
+//! Seems to be a node in the DAG of "tasks" that the compiler runs
+//! Assume it's a DAG and not sequence because simplings can run in parallel
+//!
+//! = FUNCTIONS
+//!
+//! `addModule`:
+//! CREATES a module and adds it to a "module set" so it can be used in src
+//!
+//! `createModule`:
+//! Creates a PRIVATE module; can be used in this file but not in src
+//!
+//! `installArtifact`:
+//! Creates an "install step"
+
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
