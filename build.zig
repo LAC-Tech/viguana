@@ -25,8 +25,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const mod = b.addModule("viguana", .{
-        .root_source_file = b.path("src/root.zig"),
+    const core_mod = b.addModule("viguana-core", .{
+        .root_source_file = b.path("src/core/root.zig"),
         .target = target,
     });
 
@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "viguana", .module = mod },
+            .{ .name = "viguana", .module = core_mod },
         },
     });
 
@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = core_mod,
     });
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
