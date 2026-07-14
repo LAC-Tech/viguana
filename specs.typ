@@ -1,0 +1,79 @@
+#title[Viguana]
+
+= Product
+
+I want a terminal editor that has stuff I want built in, but also doesn't have to support any legacy cruft; a blank slate.
+
+I also want to see if I can build a highly interactive and graphical application using "deterministic core, non-deterministic shell". The mixture of Tigerstyle, Naked Objects, Hexagon Architecture that makes so much sense in my head, but I've never tried using on a UI user app.
+
+So this is partly to scratch an itch, and partly a learning exercise to further my craft.
+
+== Users
+
+If you're anything like me - and I know I am - you will like this editor. It is not meant to be an editor for every one. It's not an "editor framework" like neovim or emacs.
+
+= System
+
+== Functionality
+
+I'd like to replace my current neovim setup¸ which has:
+
+- no neck pain (equivalent should be built in; no floating windows hack nonsense)
+- fzf-lua
+- LSP integration + autocomplete
+- TreeSitter syntax highlighting
+- leader keys
+- Formatter integration
+- nvim surround - love that tag based stuff
+- a spell checker (though I would like my one to work consistently)
+
+=== V1
+
+- Monochrome
+- Single buffer
+- hjkl, insert mode, undo (undos everything done in insert mode), dd, cc
+
+=== V2
+
+Config file. Should be able to allocate a vertical slice of the terminal 80 chars wide, in the middle, like an inbuilt no-neck-pain.
+
+=== V3, V4...
+
+TBA. I think I want to be careful the order I code these in.
+
+== Non-Goals
+
+- OSes other than 64 bit linux. I'll keep the stuff that touches linux nicely separated from the core logic as a matter of architectural hygiene, but I am not going to waste braincells thinking about other OSes.
+- Scripting. I will take data config files as far as I can.
+- Feature parity with neovim, or all vim commands - only going to add the ones I use for now
+- Windowing systems
+- Working on every terminal emulator. I expect a bug free implementation of the ECMA-48 control codes. I will probably work around bugs in kitty (use it daily) and xterm (the basline), but that's about it.
+
+= Technical
+
+== Tech Stack
+
+/ Language: Zig 0.16
+/ Event Loop: io_uring
+/ Config: ZON
+/ Dependencies: TreeSitter, LSP (not sure what this needs yet)
+/ UI: ECMA-48 Control Codes
+
+I have not used Zig for a while, so I may have developed rose tinted googles, but my impressions were 1. it's quite spartan 2. I was quite productive because there were fewer distractions/choices.
+
+Rust brings up too many annoying questions. What do I use for io-uring? Where's the safety boundary? What config file format do I use? What colour knee socks should I buy? Zig is not great for exploratory programming; but I think I would rather explore in design instead of in code.
+
+visual mode.
+
+== Architecture
+
+"Deterministic Core, Non-Deterministc Shell".
+
+We want to maximise the amount of code that lives in a deterministic core. I see this taking the shape of a mealy machine; I think this most fits in with an io driven event loop, but I am not sure. Ideally inside loop we want to batch
+- writing to internal state
+- submitting CQEs
+This will be refined as we prototype.
+
+== How To Represent Text
+
+The "piece table" appeals to me alot as a WAL Enjoyer. It's also a good fit for systems programming where you are manging your own heap; Ropes seem quite complex here. #link("https://code.visualstudio.com/blogs/2018/03/23/text-buffer-reimplementation")[Peng Lyu has a great article about using piece tables in VSCode], there were problems but 1) cross that bridge when we come to it 2) they have the constrained of needing to communicate between C++ and JS, I do not. If we properly isolate this from syscalls, we can just test this in headless mode and see what happens.
