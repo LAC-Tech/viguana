@@ -2,3 +2,8 @@
 - Never edit the specs
 - If I haven't specified it, don't generate it. The onus is on me is to specify, not for you to mind read or try and fill in gaps.
 - No "smoke tests"; the idea is that the core should contain so much logic that it's tests alone suffice
+
+## Zig Specific
+
+- prefer passing in allocators to storing them.
+- no `catch {}`; if there's no graceful way to recover do `catch unreachable`

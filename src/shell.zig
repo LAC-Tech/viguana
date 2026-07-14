@@ -1,12 +1,12 @@
 const std = @import("std");
 const core = @import("core.zig");
 const linux = std.os.linux;
+const mem = std.mem;
 const posix = std.posix;
 const Io = std.Io;
-const Dir = Io.Dir;
 
 pub const Shell = struct {
-    allocator: std.mem.Allocator,
+    allocator: mem.Allocator,
     io: Io,
     ring: linux.IoUring,
     stdin_fd: i32,
@@ -20,7 +20,11 @@ pub const Shell = struct {
     const READ_UD: u64 = 0;
     const WRITE_UD: u64 = 1;
 
-    pub fn init(allocator: std.mem.Allocator, io: Io, filename: []const u8) !Shell {
+    pub fn init(
+        allocator: mem.Allocator,
+        io: Io,
+        filename: []const u8,
+    ) !Shell {
         const text = try readFile(allocator, io, filename);
         defer allocator.free(text);
 
@@ -55,7 +59,11 @@ pub const Shell = struct {
     }
 
     pub fn deinit(self: *Shell) void {
-        _ = posix.tcsetattr(self.stdin_fd, .FLUSH, self.original_termios) catch {};
+        _ = posix.tcsetattr(
+            self.stdin_fd,
+            .FLUSH,
+            self.original_termios,
+        ) catch unreachable;
         self.ring.deinit();
         self.editor.deinit();
         self.render_buffer.deinit(self.allocator);
@@ -158,10 +166,16 @@ pub const Shell = struct {
         // Position cursor.
         if (self.editor.mode == .command) {
             const col = self.editor.command.items.len + 2;
-            try self.appendFormat("\x1b[{d};{d}H", .{ self.editor.screen.height, col });
+            try self.appendFormat("\x1b[{d};{d}H", .{
+                self.editor.screen.height,
+                col,
+            });
         } else {
             const cursor = info.cursor_screen;
-            try self.appendFormat("\x1b[{d};{d}H", .{ cursor.row + 1, cursor.col + 1 });
+            try self.appendFormat("\x1b[{d};{d}H", .{
+                cursor.row + 1,
+                cursor.col + 1,
+            });
         }
 
         try self.submitWrite(self.render_buffer.items);
@@ -172,15 +186,24 @@ pub const Shell = struct {
         try self.render_buffer.appendSlice(self.allocator, s);
     }
 
-    fn appendFormat(self: *Shell, comptime fmt: []const u8, args: anytype) !void {
+    fn appendFormat(
+        self: *Shell,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) !void {
         var buf: [256]u8 = undefined;
         const written = try std.fmt.bufPrint(&buf, fmt, args);
         try self.appendString(written);
     }
 };
 
-fn readFile(allocator: std.mem.Allocator, io: Io, filename: []const u8) ![]u8 {
-    const file = Dir.openFile(.cwd(), io, filename, .{}) catch |err| switch (err) {
+fn readFile(allocator: mem.Allocator, io: Io, filename: []const u8) ![]u8 {
+    const file = Io.Dir.openFile(
+        .cwd(),
+        io,
+        filename,
+        .{},
+    ) catch |err| switch (err) {
         error.FileNotFound => return try allocator.dupe(u8, ""),
         else => |e| return e,
     };
@@ -195,12 +218,16 @@ fn readFile(allocator: std.mem.Allocator, io: Io, filename: []const u8) ![]u8 {
 }
 
 fn writeFile(io: Io, filename: []const u8, data: []const u8) !void {
-    try Dir.writeFile(.cwd(), io, .{ .sub_path = filename, .data = data });
+    try Io.Dir.writeFile(.cwd(), io, .{ .sub_path = filename, .data = data });
 }
 
 fn getTerminalSize() !core.Size {
     var ws: posix.winsize = undefined;
-    const rc = linux.ioctl(Io.File.stdout().handle, linux.T.IOCGWINSZ, @intFromPtr(&ws));
+    const rc = linux.ioctl(
+        Io.File.stdout().handle,
+        linux.T.IOCGWINSZ,
+        @intFromPtr(&ws),
+    );
     if (linux.errno(rc) != .SUCCESS) return error.IoctlFailed;
     return .{ .width = ws.col, .height = ws.row };
 }
@@ -224,7 +251,7 @@ fn setRawMode(termios: *posix.termios) void {
     termios.cc[@intFromEnum(linux.V.TIME)] = 0;
 }
 
-pub fn run(allocator: std.mem.Allocator, io: Io, filename: []const u8) !void {
+pub fn run(allocator: mem.Allocator, io: Io, filename: []const u8) !void {
     var shell = try Shell.init(allocator, io, filename);
     defer shell.deinit();
     try shell.run();

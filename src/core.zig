@@ -1,4 +1,7 @@
 const std = @import("std");
+const mem = std.mem;
+const ArrayList = std.ArrayList;
+const testing = std.testing;
 
 pub const Buffer = enum { original, add };
 
@@ -11,16 +14,20 @@ pub const Piece = struct {
 /// A piece table: two immutable-ish source buffers (original + add) and a list
 /// of pieces that describe the current logical sequence.
 pub const PieceTable = struct {
-    allocator: std.mem.Allocator,
+    allocator: mem.Allocator,
     original: []const u8,
-    add: std.ArrayList(u8),
-    pieces: std.ArrayList(Piece),
+    add: ArrayList(u8),
+    pieces: ArrayList(Piece),
 
-    pub fn init(allocator: std.mem.Allocator, original: []const u8) !PieceTable {
+    pub fn init(allocator: mem.Allocator, original: []const u8) !PieceTable {
         const owned_original = try allocator.dupe(u8, original);
-        var pieces = std.ArrayList(Piece).empty;
+        var pieces = ArrayList(Piece).empty;
         if (original.len > 0) {
-            try pieces.append(allocator, .{ .buffer = .original, .start = 0, .len = original.len });
+            try pieces.append(allocator, .{
+                .buffer = .original,
+                .start = 0,
+                .len = original.len,
+            });
         }
         return .{
             .allocator = allocator,
@@ -57,7 +64,11 @@ pub const PieceTable = struct {
         try self.add.appendSlice(self.allocator, text);
 
         if (self.pieces.items.len == 0) {
-            try self.pieces.append(self.allocator, .{ .buffer = .add, .start = start, .len = text.len });
+            try self.pieces.append(self.allocator, .{
+                .buffer = .add,
+                .start = start,
+                .len = text.len,
+            });
             return;
         }
 
@@ -67,9 +78,21 @@ pub const PieceTable = struct {
             const p = self.pieces.items[i];
             if (current + p.len >= offset) {
                 const split = offset - current;
-                const left = Piece{ .buffer = p.buffer, .start = p.start, .len = split };
-                const right = Piece{ .buffer = p.buffer, .start = p.start + split, .len = p.len - split };
-                const new = Piece{ .buffer = .add, .start = start, .len = text.len };
+                const left = Piece{
+                    .buffer = p.buffer,
+                    .start = p.start,
+                    .len = split,
+                };
+                const right = Piece{
+                    .buffer = p.buffer,
+                    .start = p.start + split,
+                    .len = p.len - split,
+                };
+                const new = Piece{
+                    .buffer = .add,
+                    .start = start,
+                    .len = text.len,
+                };
 
                 try self.pieces.ensureUnusedCapacity(self.allocator, 2);
                 self.pieces.items[i] = left;
@@ -81,7 +104,11 @@ pub const PieceTable = struct {
         }
 
         // offset beyond the end: append.
-        try self.pieces.append(self.allocator, .{ .buffer = .add, .start = start, .len = text.len });
+        try self.pieces.append(self.allocator, .{
+            .buffer = .add,
+            .start = start,
+            .len = text.len,
+        });
     }
 
     pub fn delete(self: *PieceTable, start: usize, end: usize) !void {
@@ -114,11 +141,20 @@ pub const PieceTable = struct {
                 const left_len = start - piece_start;
                 const right_start = p.start + (end - piece_start);
                 const right_len = p.len - left_len - (end - start);
-                const left = Piece{ .buffer = p.buffer, .start = p.start, .len = left_len };
-                const right = Piece{ .buffer = p.buffer, .start = right_start, .len = right_len };
+                const left = Piece{
+                    .buffer = p.buffer,
+                    .start = p.start,
+                    .len = left_len,
+                };
+                const right = Piece{
+                    .buffer = p.buffer,
+                    .start = right_start,
+                    .len = right_len,
+                };
                 try self.pieces.ensureUnusedCapacity(self.allocator, 1);
                 self.pieces.items[i] = left;
                 self.pieces.insertAssumeCapacity(i + 1, right);
+
                 return;
             }
 
@@ -167,7 +203,7 @@ pub const PieceTable = struct {
         }
     };
 
-    pub fn toString(self: *const PieceTable, allocator: std.mem.Allocator) ![]u8 {
+    pub fn toString(self: *const PieceTable, allocator: mem.Allocator) ![]u8 {
         const result = try allocator.alloc(u8, self.totalLen());
         var it = self.iter();
         var i: usize = 0;
@@ -189,8 +225,12 @@ pub const PieceTable = struct {
 
     /// Returns the content of the given line without the trailing newline.
     /// Caller owns the returned slice.
-    pub fn getLine(self: *const PieceTable, allocator: std.mem.Allocator, line_index: usize) ![]u8 {
-        var buf = std.ArrayList(u8).empty;
+    pub fn getLine(
+        self: *const PieceTable,
+        allocator: mem.Allocator,
+        line_index: usize,
+    ) ![]u8 {
+        var buf = ArrayList(u8).empty;
         var current_line: usize = 0;
         var it = self.iter();
         while (it.next()) |b| {
@@ -224,7 +264,11 @@ pub const PieceTable = struct {
     }
 
     /// Convert a line/column pair to a logical byte offset.
-    pub fn lineColToOffset(self: *const PieceTable, line: usize, col: usize) usize {
+    pub fn lineColToOffset(
+        self: *const PieceTable,
+        line: usize,
+        col: usize,
+    ) usize {
         var current_line: usize = 0;
         var current_col: usize = 0;
         var offset: usize = 0;
@@ -264,32 +308,18 @@ pub const PieceTable = struct {
     }
 };
 
-pub const Pos = struct {
-    row: usize,
-    col: usize,
-};
+pub const Pos = struct { row: usize, col: usize };
 
-pub const Size = struct {
-    width: usize,
-    height: usize,
-};
+pub const Size = struct { width: usize, height: usize };
 
-pub const Mode = enum {
-    normal,
-    insert,
-    command,
-};
+pub const Mode = enum { normal, insert, command };
 
-pub const Effect = union(enum) {
-    quit,
-    save,
-    message: []const u8,
-};
+pub const Effect = union(enum) { quit, save, message: []const u8 };
 
 pub const UndoEntry = struct {
     text: []const u8,
     cursor: Pos,
-    allocator: std.mem.Allocator,
+    allocator: mem.Allocator,
 
     pub fn deinit(self: *UndoEntry) void {
         self.allocator.free(self.text);
@@ -297,25 +327,30 @@ pub const UndoEntry = struct {
 };
 
 pub const Editor = struct {
-    allocator: std.mem.Allocator,
+    allocator: mem.Allocator,
     table: PieceTable,
     mode: Mode,
     cursor: Pos,
     scroll: usize,
     screen: Size,
-    command: std.ArrayList(u8),
+    command: ArrayList(u8),
     filename: []const u8,
     dirty: bool,
     quit: bool,
-    undo_stack: std.ArrayList(UndoEntry),
+    undo_stack: ArrayList(UndoEntry),
     saved_for_undo: bool,
 
-    pub fn init(allocator: std.mem.Allocator, text: []const u8, filename: []const u8, screen: Size) !Editor {
+    pub fn init(
+        allocator: mem.Allocator,
+        text: []const u8,
+        filename: []const u8,
+        screen: Size,
+    ) !Editor {
         var table = try PieceTable.init(allocator, text);
         errdefer table.deinit();
 
-        const undo_stack = std.ArrayList(UndoEntry).empty;
-        const command = std.ArrayList(u8).empty;
+        const undo_stack = ArrayList(UndoEntry).empty;
+        const command = ArrayList(u8).empty;
 
         const cursor = Pos{ .row = 0, .col = 0 };
         if (table.lineCount() == 0) {
@@ -364,7 +399,8 @@ pub const Editor = struct {
 
     fn clampScroll(self: *Editor) void {
         const vh = self.viewHeight();
-        const max_scroll = if (self.table.lineCount() > vh) self.table.lineCount() - vh else 0;
+        const max_scroll =
+            if (self.table.lineCount() > vh) self.table.lineCount() - vh else 0;
         self.scroll = @min(self.scroll, max_scroll);
     }
 
@@ -411,7 +447,10 @@ pub const Editor = struct {
     }
 
     fn insertAtCursor(self: *Editor, text: []const u8) !void {
-        const offset = self.table.lineColToOffset(self.cursor.row, self.cursor.col);
+        const offset = self.table.lineColToOffset(
+            self.cursor.row,
+            self.cursor.col,
+        );
         try self.table.insert(offset, text);
         const new_pos = self.table.offsetToLineCol(offset + text.len);
         self.cursor = .{ .row = new_pos.line, .col = new_pos.col };
@@ -420,7 +459,10 @@ pub const Editor = struct {
     }
 
     fn deleteAtCursor(self: *Editor, count: usize) !void {
-        const offset = self.table.lineColToOffset(self.cursor.row, self.cursor.col);
+        const offset = self.table.lineColToOffset(
+            self.cursor.row,
+            self.cursor.col,
+        );
         const total = self.table.totalLen();
         const end = @min(offset + count, total);
         if (end > offset) {
@@ -467,11 +509,11 @@ pub const Editor = struct {
 
     fn executeCommand(self: *Editor) !?Effect {
         const cmd = self.command.items;
-        if (std.mem.eql(u8, cmd, "w")) {
+        if (mem.eql(u8, cmd, "w")) {
             self.command.clearRetainingCapacity();
             self.mode = .normal;
             return .save;
-        } else if (std.mem.eql(u8, cmd, "q")) {
+        } else if (mem.eql(u8, cmd, "q")) {
             self.command.clearRetainingCapacity();
             self.quit = true;
             return .quit;
@@ -547,11 +589,18 @@ pub const Editor = struct {
                         try self.insertAtCursor("\n");
                     } else if (k == 127 or k == '\x08') { // Backspace / DEL
                         if (self.cursor.col > 0 or self.cursor.row > 0) {
-                            const offset = self.table.lineColToOffset(self.cursor.row, self.cursor.col);
+                            const offset = self.table.lineColToOffset(
+                                self.cursor.row,
+                                self.cursor.col,
+                            );
                             if (offset > 0) {
                                 try self.table.delete(offset - 1, offset);
-                                const new_pos = self.table.offsetToLineCol(offset - 1);
-                                self.cursor = .{ .row = new_pos.line, .col = new_pos.col };
+                                const new_pos =
+                                    self.table.offsetToLineCol(offset - 1);
+                                self.cursor = .{
+                                    .row = new_pos.line,
+                                    .col = new_pos.col,
+                                };
                                 self.dirty = true;
                                 self.clampCursor();
                                 self.ensureCursorVisible();
@@ -601,15 +650,19 @@ pub const Editor = struct {
         };
     }
 
-    pub fn getVisibleLine(self: *Editor, allocator: std.mem.Allocator, screen_row: usize) ?[]u8 {
+    pub fn getVisibleLine(
+        self: *Editor,
+        allocator: mem.Allocator,
+        screen_row: usize,
+    ) ?[]u8 {
         const line = self.scroll + screen_row;
         if (line >= self.table.lineCount()) return null;
         return self.table.getLine(allocator, line) catch null;
     }
 
-    pub fn getCommandLine(self: *Editor, allocator: std.mem.Allocator) !?[]u8 {
+    pub fn getCommandLine(self: *Editor, allocator: mem.Allocator) !?[]u8 {
         if (self.mode != .command) return null;
-        var result = std.ArrayList(u8).empty;
+        var result = ArrayList(u8).empty;
         try result.append(allocator, ':');
         try result.appendSlice(allocator, self.command.items);
         const slice = try result.toOwnedSlice(allocator);
@@ -620,7 +673,7 @@ pub const Editor = struct {
 // ---- Tests ------------------------------------------------------------------
 
 test "piece table insert and iterate" {
-    const gpa = std.testing.allocator;
+    const gpa = testing.allocator;
     var pt = try PieceTable.init(gpa, "hello");
     defer pt.deinit();
 
@@ -629,41 +682,41 @@ test "piece table insert and iterate" {
 
     const text = try pt.toString(gpa);
     defer gpa.free(text);
-    try std.testing.expectEqualSlices(u8, "say hello world", text);
+    try testing.expectEqualSlices(u8, "say hello world", text);
 }
 
 test "piece table delete" {
-    const gpa = std.testing.allocator;
+    const gpa = testing.allocator;
     var pt = try PieceTable.init(gpa, "hello world");
     defer pt.deinit();
 
     try pt.delete(5, 11);
     const text = try pt.toString(gpa);
     defer gpa.free(text);
-    try std.testing.expectEqualSlices(u8, "hello", text);
+    try testing.expectEqualSlices(u8, "hello", text);
 }
 
 test "piece table line operations" {
-    const gpa = std.testing.allocator;
+    const gpa = testing.allocator;
     var pt = try PieceTable.init(gpa, "one\ntwo\nthree");
     defer pt.deinit();
 
-    try std.testing.expectEqual(@as(usize, 3), pt.lineCount());
+    try testing.expectEqual(@as(usize, 3), pt.lineCount());
 
     const line0 = try pt.getLine(gpa, 0);
     defer gpa.free(line0);
-    try std.testing.expectEqualSlices(u8, "one", line0);
+    try testing.expectEqualSlices(u8, "one", line0);
 
     const line1 = try pt.getLine(gpa, 1);
     defer gpa.free(line1);
-    try std.testing.expectEqualSlices(u8, "two", line1);
+    try testing.expectEqualSlices(u8, "two", line1);
 
-    try std.testing.expectEqual(@as(usize, 0), pt.lineStartOffset(0));
-    try std.testing.expectEqual(@as(usize, 3), pt.lineEndOffset(0));
+    try testing.expectEqual(@as(usize, 0), pt.lineStartOffset(0));
+    try testing.expectEqual(@as(usize, 3), pt.lineEndOffset(0));
 }
 
 test "editor movement" {
-    const gpa = std.testing.allocator;
+    const gpa = testing.allocator;
     var ed = try Editor.init(gpa, "abc\ndef\nghi", "test", .{ .width = 80, .height = 24 });
     defer ed.deinit();
 
@@ -671,22 +724,25 @@ test "editor movement" {
     _ = try ed.handleKey("l");
     _ = try ed.handleKey("l");
     _ = try ed.handleKey("l");
-    try std.testing.expectEqual(@as(usize, 3), ed.cursor.col);
+    try testing.expectEqual(@as(usize, 3), ed.cursor.col);
 
     _ = try ed.handleKey("j");
-    try std.testing.expectEqual(@as(usize, 1), ed.cursor.row);
-    try std.testing.expectEqual(@as(usize, 3), ed.cursor.col);
+    try testing.expectEqual(@as(usize, 1), ed.cursor.row);
+    try testing.expectEqual(@as(usize, 3), ed.cursor.col);
 
     _ = try ed.handleKey("h");
-    try std.testing.expectEqual(@as(usize, 2), ed.cursor.col);
+    try testing.expectEqual(@as(usize, 2), ed.cursor.col);
 
     _ = try ed.handleKey("k");
-    try std.testing.expectEqual(@as(usize, 0), ed.cursor.row);
+    try testing.expectEqual(@as(usize, 0), ed.cursor.row);
 }
 
 test "editor insert and undo" {
-    const gpa = std.testing.allocator;
-    var ed = try Editor.init(gpa, "abc\ndef", "test", .{ .width = 80, .height = 24 });
+    const gpa = testing.allocator;
+    var ed = try Editor.init(gpa, "abc\ndef", "test", .{
+        .width = 80,
+        .height = 24,
+    });
     defer ed.deinit();
 
     _ = try ed.handleKey("i");
@@ -696,19 +752,22 @@ test "editor insert and undo" {
 
     const text1 = try ed.table.toString(gpa);
     defer gpa.free(text1);
-    try std.testing.expectEqualSlices(u8, "xyzabc\ndef", text1);
+    try testing.expectEqualSlices(u8, "xyzabc\ndef", text1);
 
     _ = try ed.handleKey("\x1b"); // Esc
     _ = try ed.handleKey("u");
 
     const text2 = try ed.table.toString(gpa);
     defer gpa.free(text2);
-    try std.testing.expectEqualSlices(u8, "abc\ndef", text2);
+    try testing.expectEqualSlices(u8, "abc\ndef", text2);
 }
 
 test "editor dd" {
-    const gpa = std.testing.allocator;
-    var ed = try Editor.init(gpa, "abc\ndef\nghi", "test", .{ .width = 80, .height = 24 });
+    const gpa = testing.allocator;
+    var ed = try Editor.init(gpa, "abc\ndef\nghi", "test", .{
+        .width = 80,
+        .height = 24,
+    });
     defer ed.deinit();
 
     _ = try ed.handleKey("j");
@@ -716,12 +775,15 @@ test "editor dd" {
 
     const text = try ed.table.toString(gpa);
     defer gpa.free(text);
-    try std.testing.expectEqualSlices(u8, "abc\nghi", text);
+    try testing.expectEqualSlices(u8, "abc\nghi", text);
 }
 
 test "editor cc" {
-    const gpa = std.testing.allocator;
-    var ed = try Editor.init(gpa, "abc\ndef\nghi", "test", .{ .width = 80, .height = 24 });
+    const gpa = testing.allocator;
+    var ed = try Editor.init(gpa, "abc\ndef\nghi", "test", .{
+        .width = 80,
+        .height = 24,
+    });
     defer ed.deinit();
 
     _ = try ed.handleKey("j");
@@ -732,12 +794,15 @@ test "editor cc" {
 
     const text = try ed.table.toString(gpa);
     defer gpa.free(text);
-    try std.testing.expectEqualSlices(u8, "abc\nxy\nghi", text);
+    try testing.expectEqualSlices(u8, "abc\nxy\nghi", text);
 }
 
 test "editor undo dd" {
-    const gpa = std.testing.allocator;
-    var ed = try Editor.init(gpa, "abc\ndef\nghi", "test", .{ .width = 80, .height = 24 });
+    const gpa = testing.allocator;
+    var ed = try Editor.init(gpa, "abc\ndef\nghi", "test", .{
+        .width = 80,
+        .height = 24,
+    });
     defer ed.deinit();
 
     _ = try ed.handleKey("j");
@@ -746,12 +811,15 @@ test "editor undo dd" {
 
     const text = try ed.table.toString(gpa);
     defer gpa.free(text);
-    try std.testing.expectEqualSlices(u8, "abc\ndef\nghi", text);
+    try testing.expectEqualSlices(u8, "abc\ndef\nghi", text);
 }
 
 test "editor undo cc" {
-    const gpa = std.testing.allocator;
-    var ed = try Editor.init(gpa, "abc\ndef\nghi", "test", .{ .width = 80, .height = 24 });
+    const ta = testing.allocator;
+    var ed = try Editor.init(ta, "abc\ndef\nghi", "test", .{
+        .width = 80,
+        .height = 24,
+    });
     defer ed.deinit();
 
     _ = try ed.handleKey("j");
@@ -760,27 +828,30 @@ test "editor undo cc" {
     _ = try ed.handleKey("\x1b"); // Esc
     _ = try ed.handleKey("u");
 
-    const text = try ed.table.toString(gpa);
-    defer gpa.free(text);
-    try std.testing.expectEqualSlices(u8, "abc\ndef\nghi", text);
+    const text = try ed.table.toString(ta);
+    defer ta.free(text);
+    try testing.expectEqualSlices(u8, "abc\ndef\nghi", text);
 }
 
 test "editor command save and quit" {
-    const gpa = std.testing.allocator;
-    var ed = try Editor.init(gpa, "abc\ndef", "test", .{ .width = 80, .height = 24 });
+    const ta = testing.allocator;
+    var ed = try Editor.init(ta, "abc\ndef", "test", .{
+        .width = 80,
+        .height = 24,
+    });
     defer ed.deinit();
 
     _ = try ed.handleKey(":");
     _ = try ed.handleKey("w");
     const effect = try ed.handleKey("\r");
-    try std.testing.expect(effect != null);
-    try std.testing.expect(effect.? == .save);
-    try std.testing.expectEqual(Mode.normal, ed.mode);
+    try testing.expect(effect != null);
+    try testing.expect(effect.? == .save);
+    try testing.expectEqual(Mode.normal, ed.mode);
 
     _ = try ed.handleKey(":");
     _ = try ed.handleKey("q");
     const effect2 = try ed.handleKey("\r");
-    try std.testing.expect(effect2 != null);
-    try std.testing.expect(effect2.? == .quit);
-    try std.testing.expect(ed.quit);
+    try testing.expect(effect2 != null);
+    try testing.expect(effect2.? == .quit);
+    try testing.expect(ed.quit);
 }
