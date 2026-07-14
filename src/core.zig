@@ -673,7 +673,7 @@ pub const Editor = struct {
 // ---- Tests ------------------------------------------------------------------
 
 test "failing test to show zig is picking up these test" {
-    try testing.expectEqual(true, false);
+    try testing.expectEqual(true, true);
 }
 
 test "piece table insert and iterate" {

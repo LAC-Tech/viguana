@@ -5,5 +5,6 @@
 
 ## Zig Specific
 
+- test using `zig build --summary all`
 - prefer passing in allocators to storing them.
 - no `catch {}`; if there's no graceful way to recover do `catch unreachable`
