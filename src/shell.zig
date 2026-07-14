@@ -35,7 +35,7 @@ pub const Shell = struct {
 
         const size = try terminal.getSize();
         var editor = try core.Editor.init(allocator, text, filename, size);
-        errdefer editor.deinit();
+        errdefer editor.deinit(allocator);
 
         var ring = try linux.IoUring.init(16, 0);
         errdefer ring.deinit();
@@ -53,9 +53,9 @@ pub const Shell = struct {
         };
     }
 
-    pub fn deinit(self: *Shell) void {
+    pub fn deinit(self: *Shell, allocator: mem.Allocator) void {
         self.ring.deinit();
-        self.editor.deinit();
+        self.editor.deinit(allocator);
         self.terminal.deinit();
     }
 
@@ -99,7 +99,7 @@ pub const Shell = struct {
         // V1: one byte per key, no escape sequences beyond bare Esc.
         for (bytes) |b| {
             const key = [1]u8{b};
-            if (try self.editor.handleKey(&key)) |effect| {
+            if (try self.editor.handleKey(self.allocator, &key)) |effect| {
                 try self.handleEffect(effect);
             }
         }
@@ -117,7 +117,7 @@ pub const Shell = struct {
     }
 
     fn saveFile(self: *Shell) !void {
-        const text = try self.editor.table.toString(self.allocator);
+        const text = try self.editor.file.toString(self.allocator);
         defer self.allocator.free(text);
         try writeFile(self.io, self.editor.filename, text);
         self.editor.dirty = false;
@@ -156,6 +156,6 @@ fn writeFile(io: Io, filename: []const u8, data: []const u8) !void {
 
 pub fn run(allocator: mem.Allocator, io: Io, filename: []const u8) !void {
     var shell = try Shell.init(allocator, io, filename);
-    defer shell.deinit();
+    defer shell.deinit(allocator);
     try shell.run();
 }
