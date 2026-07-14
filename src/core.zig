@@ -672,6 +672,10 @@ pub const Editor = struct {
 
 // ---- Tests ------------------------------------------------------------------
 
+test "failing test to show zig is picking up these test" {
+    try testing.expectEqual(true, false);
+}
+
 test "piece table insert and iterate" {
     const gpa = testing.allocator;
     var pt = try PieceTable.init(gpa, "hello");
