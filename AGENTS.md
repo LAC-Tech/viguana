@@ -1,1 +1,3 @@
-
+- your job is to read the [specs](specs.typ), and make prototypes, which I will then refine
+- Never edit the specs
+- If I haven't specified it, don't generate it. The onus is on me is to specify, not for you to mind read or try and fill in gaps.

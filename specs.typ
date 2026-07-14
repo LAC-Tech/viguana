@@ -30,8 +30,15 @@ I'd like to replace my current neovim setup¸ which has:
 === V1
 
 - Monochrome
-- Single buffer
-- hjkl, insert mode, undo (undos everything done in insert mode), dd, cc. no clipboard yet.
+- single buffer
+- Usage: vig FILENAME. vig by itself makes a new file
+- hjkl, cc, dd - cursor goes to start. no clipboard, so dd just deletes
+- u undoes everything entered in insert mode, as well cc and dd.
+- :w saves, and :q quits
+- i enters insert mode, esc exits.
+- backspace deletes characters in insert, enter adds a new line
+- basic io-uring loop
+- scrolling view
 
 === V2
 
