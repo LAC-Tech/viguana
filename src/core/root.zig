@@ -7,9 +7,11 @@ const mem = std.mem;
 const testing = std.testing;
 const ta = testing.allocator;
 
-const Vec = @import("vec.zig").Vec;
+const vec = @import("vec.zig");
+const Vec = vec.Vec;
 //--------------------------------------------------------------- IMPLEMENTATION
 
+/// Hard limits to prevent re-allocation
 /// In a bold, daring example of counter-YAGNIism, this is a struct.
 /// All members have a default value, but one day it will be a zon file
 const Limits = struct {
@@ -38,44 +40,21 @@ const Piece = packed struct(u64) {
 // Implemented with piece tables:
 // https://www.cs.unm.edu/~crowley/papers/sds.pdf
 const File = struct {
-    /// A buffer to a temporary file. This buffer is append-only.
+    // Read-only buffer to the original file
+    file_buf: []const u8,
+    /// Append only buffer to a temp file
     add_buf: Vec(u8),
     piece_tbl: Vec(Piece),
-
-    pub fn init(buf: []u8, limits: Limits, file_buf: []const u8) !File {
-        var old_size: usize = 0;
-        var size: usize = undefined;
-
-        size = limits.new_chars_until_swap_write * @sizeOf(u8);
-        const add_buf = Vec(u8).init(buf[old_size .. old_size + limits]);
-        old_size = size;
-
-        size = limits.inserts_and_undos_until_swap_write * @sizeOf(Piece);
-        var pieces = Vec(Piece).init(buf[old_size .. old_size + size]);
-
-        try pieces.push(.{
-            .tag = .original,
-            .start = 0,
-            // TODO return error, don't panic
-            .len = math.cast(FileSize, file_buf.len) orelse
-                debug.panic("File is {d} bytes long; must be less than {d}", .{
-                    file_buf.len,
-                    math.maxInt(FileSize),
-                }),
-        });
-        return .{
-            .add_buf = add_buf,
-            .piece_tbl = pieces,
-        };
-    }
 };
 
 const Err = error{
-    FileToOLarge,
+    FileTooLarge,
 };
 
 const Self = @This();
 
+/// All the heap memory that will ever be needed.
+/// It's owned by core and should not be touched.
 _heap_mem: []const u8,
 _file: File,
 
@@ -83,7 +62,7 @@ fn init(
     a: mem.Allocator,
     limits: Limits,
     file_buf: []const u8,
-) !Self {
+) (Err || mem.Allocator.Error || vec.Err)!Self {
     const heap_mem_size =
         limits.new_chars_until_swap_write * @sizeOf(u8) +
         limits.inserts_and_undos_until_swap_write * @sizeOf(Piece);
@@ -108,6 +87,7 @@ fn init(
     const result = Self{
         ._heap_mem = heap_mem,
         ._file = .{
+            .file_buf = file_buf,
             .add_buf = Vec(u8).init(
                 try in_a.alloc(u8, limits.new_chars_until_swap_write),
             ),

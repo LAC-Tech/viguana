@@ -69,7 +69,7 @@ TBA. I think I want to be careful the order I code these in.
 / Dependencies: TreeSitter, LSP (not sure what this needs yet)
 / UI: ECMA-48 Control Codes
 
-I have not used Zig for a while, so I may have developed rose tinted googles, but my impressions were 1. it's quite spartan 2. I was quite productive because there were fewer distractions/choices.
+I have not used Zig for a while, so I may have developed rose tinted gogles, but my impressions were 1. it's quite spartan 2. I was quite productive because there were fewer distractions/choices.
 
 Rust brings up too many annoying questions. What do I use for io-uring? Where's the safety boundary? What config file format do I use? What colour knee socks should I buy? Zig is not great for exploratory programming; but I think I would rather explore in design instead of in code.
 
@@ -84,20 +84,22 @@ We want to maximise the amount of code that lives in a deterministic core. I see
 
 This will be refined as we prototype.
 
+=== Core
+
+In memory, abstract representation of the entire editor and every file it has open.
+
 == How To Represent Text
 
 The "piece table" appeals to me alot as a WAL Enjoyer. It's also a good fit for systems programming where you are manging your own heap; Ropes seem quite complex here. #link("https://code.visualstudio.com/blogs/2018/03/23/text-buffer-reimplementation")[Peng Lyu has a great article about using piece tables in VSCode], there were problems but 1) cross that bridge when we come to it 2) they have the constrained of needing to communicate between C++ and JS, I do not. If we properly isolate this from syscalls, we can just test this in headless mode and see what happens.
 
 == Bulk Allocation
 
-The idea of bulk allocating all memory needed core the core, ala Tigerbeetle, is appealing to me. Let's do some back of the envelop calculations.
+The idea of bulk allocating all memory needed for the core, ala Tigerbeetle, is appealing to me. Let's do some back of the envelop calculations.
 
 Open Files: 256
 Consecutive Edits/Undos: 4906
 Piece/Span: 64 bits
 
-That's under 8.4 megabytes; or 6 floppy disks. Of course god knos what we'd need once LSP and Treesitter gets added, but it seems like a decent starting point. I just started neovim, it allocated just under 50 megabytes across two processes. 64 megabytes for one process sounds good?
+That's under 8.4 megabytes; or 6 floppy disks. Of course god knows what we'd need once LSP and Treesitter gets added, but it seems like a decent starting point. I just started neovim, it allocated just under 50 megabytes across two processes. 64 megabytes for one process sounds good?
 
 Also, this editor is for _me_. I don't have thousands of tabs open or edit 8 gb files.
-
-To do this, I will make my own "FixVec"; or fixed capacity vector. ArrayList will panic on `appendAssumeCapacity`, we want a very graceful shutdown to inform the user what happened.

@@ -1,4 +1,9 @@
-//! Fixed capacity vectors that do not panic on overflow
+//! Fixed capacity vectors that do not panic on overflow.
+//! I do not want the core to allocate, so we want vectors that assume this.
+//!
+//! However ArrayList is not suitable:
+//! - `appendAssumeCapacity` *panics* on overflow
+//! - we need to gracefully inform user via the UI what's happened, not crash
 
 //---------------------------------------------------------------------- IMPORTS
 const std = @import("std");
@@ -7,7 +12,7 @@ const mem = std.mem;
 const testing = std.testing;
 const ta = std.testing.allocator;
 //--------------------------------------------------------------- IMPLEMENTATION
-const Err = error{
+pub const Err = error{
     Overflow,
 };
 pub fn Vec(comptime T: type) type {
