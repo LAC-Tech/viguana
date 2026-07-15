@@ -27,10 +27,13 @@ I'd like to replace my current neovim setup¸ which has:
 - nvim surround - love that tag based stuff
 - a spell checker (though I would like my one to work consistently)
 
-=== V1
+== Milestones
+
+=== Hello Files
 
 - Monochrome
 - single buffer
+- crashes after N inputs without save (fixed Piece Table)
 - Usage: vig FILENAME. vig by itself makes a new file
 - hjkl, cc, dd - cursor goes to start. no clipboard, so dd just deletes
 - u undoes everything entered in insert mode, as well cc and dd.
@@ -84,3 +87,17 @@ This will be refined as we prototype.
 == How To Represent Text
 
 The "piece table" appeals to me alot as a WAL Enjoyer. It's also a good fit for systems programming where you are manging your own heap; Ropes seem quite complex here. #link("https://code.visualstudio.com/blogs/2018/03/23/text-buffer-reimplementation")[Peng Lyu has a great article about using piece tables in VSCode], there were problems but 1) cross that bridge when we come to it 2) they have the constrained of needing to communicate between C++ and JS, I do not. If we properly isolate this from syscalls, we can just test this in headless mode and see what happens.
+
+== Bulk Allocation
+
+The idea of bulk allocating all memory needed core the core, ala Tigerbeetle, is appealing to me. Let's do some back of the envelop calculations.
+
+Open Files: 256
+Consecutive Edits/Undos: 4906
+Piece/Span: 64 bits
+
+That's under 8.4 megabytes; or 6 floppy disks. Of course god knos what we'd need once LSP and Treesitter gets added, but it seems like a decent starting point. I just started neovim, it allocated just under 50 megabytes across two processes. 64 megabytes for one process sounds good?
+
+Also, this editor is for _me_. I don't have thousands of tabs open or edit 8 gb files.
+
+To do this, I will make my own "FixVec"; or fixed capacity vector. ArrayList will panic on `appendAssumeCapacity`, we want a very graceful shutdown to inform the user what happened.

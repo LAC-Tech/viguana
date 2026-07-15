@@ -2,42 +2,48 @@
 //! In emacs or vim this is a "buffer"
 
 const std = @import("std");
-const ArrayList = std.ArrayList;
+
 const debug = std.debug;
 const math = std.math;
 const mem = std.mem;
 const testing = std.testing;
 
+const ArrayList = std.ArrayList;
+const BitStack = std.BitStack;
+
 /// Theoretical max 4Gb file size
 const Size = u32;
 
-// TODO: use MultiArrayList?
 const PieceTbl = struct {
-    const Tag = enum(u1) { original, add };
+    // bit aliases.
+    const original: u1 = 0;
+    const add: u1 = 1;
+
     const Piece = packed struct(u64) { start: Size, len: Size };
 
-    // TODO: I don't think this will pack them in as tightly as I thought
-    tags: ArrayList(Tag),
+    // TODO: v0.16, I imagine we may have to vendor this soon, API feels old
+    tags: BitStack,
     pieces: ArrayList(Piece),
 
     fn init(a: mem.Allocator) !@This() {
         const initialCapacity = 4096; // TODO: arbitrary
 
-        //const tags = try ArrayList(Tag).initCapacity(a, initialCapacity);
+        var tags = BitStack.init(a);
+        try tags.ensureTotalCapacity(initialCapacity);
 
         return .{
-            .tags = try ArrayList(Tag).initCapacity(a, initialCapacity),
             .pieces = try ArrayList(Piece).initCapacity(a, initialCapacity),
+            .tags = tags,
         };
     }
 
     fn deinit(self: *@This(), a: mem.Allocator) void {
-        self.tags.deinit(a);
+        self.tags.deinit();
         self.pieces.deinit(a);
     }
 
     fn appendOriginal(self: *@This(), a: mem.Allocator, piece: Piece) !void {
-        try self.tags.append(a, .original);
+        try self.tags.push(original);
         try self.pieces.append(a, piece);
     }
 };
