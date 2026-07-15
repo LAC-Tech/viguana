@@ -7,8 +7,7 @@ const mem = std.mem;
 const testing = std.testing;
 const ta = testing.allocator;
 
-const vec = @import("vec.zig");
-const Vec = vec.Vec;
+const ArrayList = std.ArrayList;
 //--------------------------------------------------------------- IMPLEMENTATION
 
 /// Hard limits to prevent re-allocation
@@ -43,8 +42,8 @@ const File = struct {
     // Read-only buffer to the original file
     file_buf: []const u8,
     /// Append only buffer to a temp file
-    add_buf: Vec(u8),
-    piece_tbl: Vec(Piece),
+    add_buf: ArrayList(u8),
+    piece_tbl: ArrayList(Piece),
 };
 
 const Err = error{
@@ -59,23 +58,24 @@ _heap_mem: []const u8,
 _file: File,
 
 fn init(
-    a: mem.Allocator,
+    one_shot_allocator: mem.Allocator,
     limits: Limits,
     file_buf: []const u8,
-) (Err || mem.Allocator.Error || vec.Err)!Self {
+) (Err || mem.Allocator.Error)!Self {
     const heap_mem_size =
         limits.new_chars_until_swap_write * @sizeOf(u8) +
         limits.inserts_and_undos_until_swap_write * @sizeOf(Piece);
 
-    const heap_mem = try a.alloc(u8, heap_mem_size);
+    const heap_mem = try one_shot_allocator.alloc(u8, heap_mem_size);
     var fba = heap.FixedBufferAllocator.init(heap_mem);
-    const in_a = fba.allocator();
+    const a = fba.allocator();
 
-    var piece_tbl = Vec(Piece).init(
-        try in_a.alloc(Piece, limits.inserts_and_undos_until_swap_write),
+    var piece_tbl = try ArrayList(Piece).initCapacity(
+        a,
+        limits.inserts_and_undos_until_swap_write,
     );
 
-    try piece_tbl.push(.{
+    try piece_tbl.appendBounded(.{
         .tag = .original,
         .start = 0,
         .len = math.cast(
@@ -88,8 +88,9 @@ fn init(
         ._heap_mem = heap_mem,
         ._file = .{
             .file_buf = file_buf,
-            .add_buf = Vec(u8).init(
-                try in_a.alloc(u8, limits.new_chars_until_swap_write),
+            .add_buf = try ArrayList(u8).initCapacity(
+                a,
+                limits.new_chars_until_swap_write,
             ),
             .piece_tbl = piece_tbl,
         },
@@ -101,15 +102,10 @@ fn init(
     return result;
 }
 
-fn deinit(self: *Self, external_allocator: mem.Allocator) void {
-    external_allocator.free(self._heap_mem);
+fn deinit(self: *Self, one_shot_allocator: mem.Allocator) void {
+    one_shot_allocator.free(self._heap_mem);
 }
 //------------------------------------------------------------------------ TESTS
-test {
-    // TODO: can I get rid of this, since I import it anyway?
-    _ = @import("vec.zig");
-}
-
 test "init & deninit" {
     var core = try Self.init(ta, Limits{}, "hello world!");
     defer core.deinit(ta);
