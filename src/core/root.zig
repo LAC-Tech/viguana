@@ -76,7 +76,7 @@ const Err = error{
 
 const Self = @This();
 
-_heap_mem: []u8,
+_heap_mem: []const u8,
 _file: File,
 
 fn init(
