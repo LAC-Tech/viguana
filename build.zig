@@ -46,14 +46,6 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    const exe_check = b.addExecutable(.{
-        .name = "viguana",
-        .root_module = exe_mod,
-    });
-
-    const check_step = b.step("check", "Check if viguana compiles");
-    check_step.dependOn(&exe_check.step);
-
     const run_step = b.step("run", "Run the app");
 
     const run_cmd = b.addRunArtifact(exe);
@@ -80,4 +72,14 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    const exe_check = b.addExecutable(.{
+        .name = "viguana",
+        .root_module = exe_mod,
+    });
+
+    const check_step = b.step("check", "Check if viguana compiles");
+    check_step.dependOn(&exe_check.step);
+    check_step.dependOn(&mod_tests.step);
+    check_step.dependOn(&exe_tests.step);
 }
