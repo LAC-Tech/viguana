@@ -19,7 +19,7 @@ const Piece = packed struct(u64) {
     tag: enum(u1) { original, add },
     start: FileSize,
     len: FileSize,
-    _reserved: u1 = undefined,
+    _reserved: u1 = 0,
 };
 
 pub const Err = error{
