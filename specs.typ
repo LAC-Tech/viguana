@@ -12,6 +12,10 @@ So this is partly to scratch an itch, and partly a learning exercise to further 
 
 If you're anything like me - and I know I am - you may like this editor. It is not meant to be an editor for every one. It's not an "editor framework" like neovim or emacs.
 
+== Name
+
+"Viguana" is a pretty rubbish play on Vi + Ziguana; it's a working name only.
+
 = System
 
 == Functionality
@@ -27,9 +31,28 @@ I'd like to replace my current neovim setup¸ which has:
 - nvim surround - love that tag based stuff
 - a spell checker (though I would like my one to work consistently)
 
+== Configurability
+
+To forestall "what scripting language do I use?", I will aim to configure it with plain data files, like helix with it's toml config.
+
+I'd also like to avoid locking in vi's keybinds. There should be default keybinds but everything should be re-assinable to something else.
+
+== How modal editors work
+
+I can reason about normal/visual/insert modes.
+
+But it feels to me that normal mode has sub modes. like 'c' starts change mode, 'd' starts delete mode, etc.
+
 == Milestones
 
-=== Hello Files
+=== Headless
+
+Something very close to busy box vi functionality, but no real IO yet, all inside the core.
+
+Testing it at this level ensures core subsumes as much functionality as possible.
+
+=== Hello File
+
 
 - Monochrome
 - single buffer
