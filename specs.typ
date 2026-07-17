@@ -2,11 +2,15 @@
 
 = Product
 
-I want a text editor, that works on the terminal, that has stuff I want built in, but also doesn't have to support any legacy cruft; a blank slate.
+I'm a neovim user. It's the best text editor for me but also verty frustrating.
+
+There's a lot of things it doesn't do out of the box, that I have to work around with plugins. A big part of that is because my vision of what a text editor should be is slightly at odds with the vi -> vim -> neovim legacy.
+
+And so I would like to start from a blank slate, that mimics what a vi like editor does but with zero legacy craft; a blank state.
 
 I also want to see if I can build a highly interactive and graphical application using "deterministic core, non-deterministic shell". The mixture of Tigerstyle, Naked Objects, Hexagon Architecture that makes so much sense in my head, but I've never tried using on a UI user app.
 
-So this is partly to scratch an itch, and partly a learning exercise to further my craft.
+So this is partly to scratch a real itch/annoyance I have, and partly a learning exercise to further my craft.
 
 == Users
 
@@ -53,7 +57,6 @@ Testing it at this level ensures core subsumes as much functionality as possible
 
 === Hello File
 
-
 - Monochrome
 - single buffer
 - crashes after N inputs without save (fixed Piece Table)
@@ -79,8 +82,9 @@ TBA. I think I want to be careful the order I code these in.
 - OSes other than 64 bit linux. I'll keep the stuff that touches linux nicely separated from the core logic as a matter of architectural hygiene, but I am not going to waste braincells thinking about other OSes.
 - Scripting. I will take data config files as far as I can.
 - Feature parity with neovim, or all vim commands - only going to add the ones I use for now
-- Windowing systems; no split pane, no floating windows. MAY have popups for LSP stuff, but everything else should just be a temp buffer.
-- Working on every terminal emulator. I expect a bug free implementation of the ECMA-48 control codes. I will probably work around bugs in kitty (use it daily) and xterm (the basline), but that's about it.
+- Windowing systems; no split pane, no floating windows. MAY have popups for LSP stuff, but everything else should just be a temporary view.
+- Working on every terminal emulator. I expect a bug free implementation of the ECMA-48 control codes. I will probably work around bugs in kitty (use it daily) and xterm (the basline), but that's about it
+- Being configurable for everyone. Soft word wrap at a particular width is not something that should be optional - the alternatives are horrendous and I don't want tou se them.
 
 = Technical
 
@@ -95,6 +99,8 @@ TBA. I think I want to be careful the order I code these in.
 I have not used Zig for a while, so I may have developed rose tinted gogles, but my impressions were 1. it's quite spartan 2. I was quite productive because there were fewer distractions/choices.
 
 Rust brings up too many annoying questions. What do I use for io-uring? Where's the safety boundary? What config file format do I use? What colour knee socks should I buy? Zig is not great for exploratory programming; but I think I would rather explore in design instead of in code.
+
+Update: I am really enjoying Zig. 0.16 is a massive improvement on 0.15.
 
 == Architecture
 
