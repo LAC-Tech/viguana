@@ -13,26 +13,34 @@ const mem = std.mem;
 const testing = std.testing;
 const ta = testing.allocator;
 const ArrayList = std.ArrayList;
+const Io = std.Io;
 const Limits = @import("limits.zig").File;
 //--------------------------------------------------------------- IMPLEMENTATION
 const Self = @This();
 
-/// Theoretical max 2Gb file size
-const FileSize = u31;
-
 const Piece = packed struct(u64) {
     tag: enum(u1) { original, add },
-    start: FileSize,
-    len: FileSize,
+    start: Limits.Size,
+    len: Limits.Size,
     _reserved: u1 = 0,
 };
 
-pub const Err = error{
-    FileTooLarge,
-    ZeroDelete,
-    ZeroInsert,
-    OutOfBoundsDelete,
-    OutOfBoundsInsert,
+pub const Err = struct {
+    pub const Init = error{
+        OriginalFileTooLarge,
+    };
+
+    const Delete = error{
+        DeleteZero,
+        DeleteOutOfBounds,
+    };
+
+    const Insert = error{
+        InsertZero,
+        InsertionOutOfBounds,
+        InsertTextTooLarge,
+    };
+    const Alloc = mem.Allocator.Error;
 };
 
 // Read-only buffer to the original file
@@ -46,7 +54,11 @@ pub fn memory_needed(limits: Limits) usize {
         ((limits.edits_until_swap_write + 1) * @sizeOf(Piece));
 }
 
-pub fn init(a: mem.Allocator, limits: Limits, file_buf: []const u8) !Self {
+pub fn init(
+    a: mem.Allocator,
+    limits: Limits,
+    file_buf: []const u8,
+) (Err.Init || Err.Alloc)!Self {
     var piece_tbl = try ArrayList(Piece).initCapacity(
         a,
         // + 1 because piece tables start with one entry already
@@ -57,9 +69,9 @@ pub fn init(a: mem.Allocator, limits: Limits, file_buf: []const u8) !Self {
         .tag = .original,
         .start = 0,
         .len = math.cast(
-            FileSize,
+            Limits.Size,
             file_buf.len,
-        ) orelse return error.FileTooLarge,
+        ) orelse return error.OriginalFileTooLarge,
     });
 
     return .{
@@ -81,25 +93,35 @@ fn deinit_testing(self: *Self, a: mem.Allocator) void {
 }
 
 // Derived/logical text
-pub fn writeSequence(self: *const Self, w: *std.Io.Writer) !void {
+fn writeSequence(self: *const Self, w: *Io.Writer) Io.Writer.Error!void {
     var it = Iterator{ .file = self, .piece_idx = 0 };
     while (it.next()) |span| {
         try w.writeAll(span);
     }
 }
 
-pub fn delete(self: *Self, start: FileSize, len: FileSize) !void {
-    if (len == 0) return error.ZeroDelete;
-    const end = math.add(FileSize, start, len) catch return error.OutOfBoundsDelete;
+pub fn delete(
+    self: *Self,
+    start: Limits.Size,
+    len: Limits.Size,
+) (Err.Delete || Err.Alloc)!void {
+    if (len == 0) return error.DeleteZero;
+    const end = math.add(
+        Limits.Size,
+        start,
+        len,
+    ) catch return error.DeleteOutOfBounds;
     const pieces = self._piece_tbl.items;
 
-    var first_piece_offset: FileSize = 0;
-    var last_piece_offset: FileSize = 0;
+    var first_piece_offset: Limits.Size = 0;
+    var last_piece_offset: Limits.Size = 0;
     var first_idx: usize = 0;
     var last_idx: usize = 0;
+    var buf: [2]Piece = undefined;
+    var replacements = ArrayList(Piece).initBuffer(&buf);
 
     {
-        var pos: FileSize = 0;
+        var pos: Limits.Size = 0;
         var maybe_first_idx: ?usize = null;
         var maybe_last_idx: ?usize = null;
 
@@ -117,15 +139,12 @@ pub fn delete(self: *Self, start: FileSize, len: FileSize) !void {
             pos = piece_end;
         }
 
-        first_idx = maybe_first_idx orelse return error.OutOfBoundsDelete;
-        last_idx = maybe_last_idx orelse return error.OutOfBoundsDelete;
+        first_idx = maybe_first_idx orelse return error.DeleteOutOfBounds;
+        last_idx = maybe_last_idx orelse return error.DeleteOutOfBounds;
     }
 
     const first_piece = pieces[first_idx];
     const last_piece = pieces[last_idx];
-
-    var buf: [2]Piece = undefined;
-    var replacements = ArrayList(Piece).initBuffer(&buf);
 
     if (first_piece_offset > 0) {
         var p = first_piece;
@@ -147,18 +166,27 @@ pub fn delete(self: *Self, start: FileSize, len: FileSize) !void {
 }
 
 // TODO: still mostly clankery, I won't understand this later
-pub fn insert(self: *Self, pos: FileSize, text: []const u8) !void {
-    if (text.len == 0) return error.ZeroInsert;
-    const pieces = self._piece_tbl.items;
-    const add_buf = self._add_buf;
+pub fn insert(
+    self: *Self,
+    pos: Limits.Size,
+    text: []const u8,
+) (Err.Insert || Err.Alloc)!void {
+    if (text.len == 0) return error.InsertZero;
+    const text_len =
+        math.cast(Limits.Size, text.len) orelse return error.InsertTextTooLarge;
 
+    const pieces = self._piece_tbl.items;
+
+    var add_buf = &self._add_buf;
     var target_idx: usize = 0;
-    var offset: FileSize = 0;
+    var offset: Limits.Size = 0;
+    var buf: [3]Piece = undefined;
+    var replacements = ArrayList(Piece).initBuffer(&buf);
 
     {
-        var pos_cursor: FileSize = 0;
-
+        var pos_cursor: Limits.Size = 0;
         var maybe_target_idx: ?usize = null;
+
         for (pieces, 0..) |p, i| {
             const piece_end = pos_cursor + p.len;
             if (pos >= pos_cursor and pos <= piece_end) {
@@ -168,35 +196,33 @@ pub fn insert(self: *Self, pos: FileSize, text: []const u8) !void {
             }
             pos_cursor = piece_end;
         }
-        target_idx = maybe_target_idx orelse return error.OutOfBoundsInsert;
+
+        target_idx = maybe_target_idx orelse return error.InsertionOutOfBounds;
     }
 
     const target = pieces[target_idx];
-    const text_len =
-        math.cast(FileSize, text.len) orelse return error.OutOfBoundsInsert;
-
     // If cursor is after most recently inserted, we can mutate piece in place
     if (offset == target.len and
         target.tag == .add and
         target.start + target.len == add_buf.items.len)
     {
-        try self._add_buf.appendSliceBounded(text);
-        pieces[target_idx].len = math.add(
-            FileSize,
+        const new_len = math.add(
+            Limits.Size,
             target.len,
             text_len,
-        ) catch return error.FileTooLarge;
+        ) catch return error.InsertTextTooLarge;
 
+        try add_buf.appendSliceBounded(text);
+        pieces[target_idx].len = new_len;
         return;
     }
 
-    const add_start =
-        math.cast(FileSize, add_buf.items.len) orelse return error.FileTooLarge;
-    try self._add_buf.appendSliceBounded(text);
+    const add_start = math.cast(
+        Limits.Size,
+        add_buf.items.len,
+    ) orelse unreachable;
+    try add_buf.appendSliceBounded(text);
     const new_piece = Piece{ .tag = .add, .start = add_start, .len = text_len };
-
-    var buf: [3]Piece = undefined;
-    var replacements = ArrayList(Piece).initBuffer(&buf);
 
     if (offset == 0) {
         // Insert before target; nothing removed.
@@ -325,7 +351,7 @@ test "deleting past end of file is invalid" {
     defer f.deinit_testing(a);
 
     try testing.expectError(
-        error.OutOfBoundsDelete,
+        error.DeleteOutOfBounds,
         f.delete(2_000_000_000, 2_000_000_000),
     );
 }
@@ -338,7 +364,7 @@ test "empty deletes are invalid" {
     var f = try Self.init(a, Limits{}, "hi");
     defer f.deinit_testing(a);
 
-    try testing.expectError(error.ZeroDelete, f.delete(0, 0));
+    try testing.expectError(error.DeleteZero, f.delete(0, 0));
 }
 
 test "inserting nothing is invalid" {
@@ -349,5 +375,5 @@ test "inserting nothing is invalid" {
     var f = try Self.init(a, Limits{}, "hi");
     defer f.deinit_testing(a);
 
-    try testing.expectError(error.ZeroInsert, f.insert(0, ""));
+    try testing.expectError(error.InsertZero, f.insert(0, ""));
 }

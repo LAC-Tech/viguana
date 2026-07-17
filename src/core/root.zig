@@ -1,4 +1,10 @@
+//! Deterministic Core of the Editor.
+//!
+//! It should only allocate memory once and free it once.
+//! This keeps memeory usage bounded, and simplifies design, and avoids memcpy
+
 //---------------------------------------------------------------------- IMPORTS
+
 const std = @import("std");
 const debug = std.debug;
 const heap = std.heap;
@@ -13,6 +19,10 @@ const File = @import("file.zig");
 //--------------------------------------------------------------- IMPLEMENTATION
 const Self = @This();
 
+pub const Err = struct {
+    pub const Alloc = mem.Allocator.Error;
+};
+
 /// All the heap memory that will ever be needed.
 /// It's owned by core and should not be touched.
 _heap_mem: []const u8,
@@ -22,7 +32,7 @@ fn init(
     one_shot_allocator: mem.Allocator,
     limits: Limits,
     file_buf: []const u8,
-) (File.Err || mem.Allocator.Error)!Self {
+) (File.Err.Init || Err.Alloc)!Self {
     const heap_mem_size = File.memory_needed(limits.file);
 
     const heap_mem = try one_shot_allocator.alloc(u8, heap_mem_size);

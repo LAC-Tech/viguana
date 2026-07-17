@@ -132,3 +132,9 @@ Piece/Span: 64 bits
 That's under 8.4 megabytes; or 6 floppy disks. Of course god knows what we'd need once LSP and Treesitter gets added, but it seems like a decent starting point. I just started neovim, it allocated just under 50 megabytes across two processes. 64 megabytes for one process sounds good?
 
 Also, this editor is for _me_. I don't have thousands of tabs open or edit 8 gb files.
+
+== Errors and Assertions
+
+Everything to do with "incorrect input" should be an error. In general, it's better to let the caller decide to crash, or not.
+
+Asserts should be about double checking coding errors which I am unable to express statically.
