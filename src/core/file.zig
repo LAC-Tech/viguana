@@ -1,7 +1,9 @@
 //! Representation of a file inside an editor.
 //! In emacs or vim this is a "buffer"
-//! Implemented with piece tables:
-//! https://www.cs.unm.edu/~crowley/papers/sds.pdf
+//!
+//! Implemented with Piece Tables, based on:
+//!     "Data Structures for Text Sequences" (Charles Crowley. 1998)
+//!     https://www.cs.unm.edu/~crowley/papers/sds.pdf
 
 //---------------------------------------------------------------------- IMPORTS
 const std = @import("std");
@@ -78,11 +80,64 @@ fn sequence(self: *const Self) Iterator {
     return Iterator{ .file = self, .piece_idx = 0 };
 }
 
+// Clanker generated - I do not understand this.
+fn delete(self: *Self, start: FileSize, len: FileSize) !void {
+    const end = start + len;
+    const pieces = self._piece_tbl.items;
+
+    var cursor: FileSize = 0;
+    // which piece contains the first deleted byte
+    var start_idx: usize = 0;
+    // how far into that piece the first deleted byte is
+    var start_offset: FileSize = 0;
+    // which piece contains the byte just past the deleted range
+    var end_idx: usize = 0;
+    // how far into that piece the deletion ends
+    var end_offset: FileSize = 0;
+
+    for (pieces, 0..) |p, p_idx| {
+        const p_len: FileSize = @intCast(p.len);
+        if (cursor + p_len > start) {
+            start_idx = p_idx;
+            start_offset = start - cursor;
+        }
+        if (cursor + p_len >= end) {
+            end_idx = p_idx;
+            end_offset = end - cursor;
+            break;
+        }
+        cursor += p_len;
+    }
+
+    // Copying before anything is mutated
+    const end_piece = pieces[end_idx];
+    self._piece_tbl.items[start_idx].len = start_offset;
+    if (end_idx > start_idx) {
+        const gap = end_idx - start_idx;
+        const rest = pieces.len - (end_idx + 1);
+        if (rest > 0) {
+            mem.copyForwards(
+                Piece,
+                self._piece_tbl.items[start_idx + 1 ..],
+                self._piece_tbl.items[end_idx + 1 ..],
+            );
+        }
+        self._piece_tbl.items = pieces[0 .. pieces.len - gap];
+    }
+    if (end_piece.len > end_offset) {
+        try self._piece_tbl.insertBounded(start_idx + 1, .{
+            .tag = end_piece.tag,
+            .start = end_piece.start + end_offset,
+            .len = end_piece.len - end_offset,
+        });
+    }
+}
+
 const Iterator = struct {
     file: *const Self,
     piece_idx: usize,
 
-    /// Returns next contiguous span/piece of bytes
+    /// Returns next contiguous span of bytes
     fn next(self: *Iterator) ?[]const u8 {
         const pieces = self.file._piece_tbl.items;
         if (self.piece_idx >= pieces.len) return null;
@@ -97,6 +152,10 @@ const Iterator = struct {
         return span;
     }
 
+    fn reset(self: *Iterator) void {
+        self.piece_idx = 0;
+    }
+
     // Collects spans into a single buffer
     fn collect(self: *Iterator, a: mem.Allocator, buf: *ArrayList(u8)) !void {
         while (self.next()) |span| {
@@ -107,17 +166,18 @@ const Iterator = struct {
 
 //------------------------------------------------------------------------ TESTS
 
-// These tests are based on the Crowley paper
-
-test "init & deinit" {
+// Test is brittle; more of a recorded debugging session
+// Its purpose is to see if I am following the algorithm accurately
+test "Crowley paper tests" {
     var aa = std.heap.ArenaAllocator.init(ta);
     defer aa.deinit();
     const a = aa.allocator();
-
-    const f = try Self.init(a, Limits{}, "A large span of text");
     var seq_buf = try ArrayList(u8).initCapacity(a, 32);
 
+    // INITIAL STATE (Figure 8) -----------------------------------------------
+    var f = try Self.init(a, Limits{}, "A large span of text");
     try testing.expectEqualStrings("A large span of text", f._file_buf);
+    try testing.expectEqualStrings("", f._add_buf.items);
     try testing.expectEqual(0, f._add_buf.items.len);
     try testing.expectEqualSlices(
         Piece,
@@ -128,8 +188,25 @@ test "init & deinit" {
         }},
         f._piece_tbl.items,
     );
-
     var seq = f.sequence();
     try seq.collect(a, &seq_buf);
     try testing.expectEqualStrings("A large span of text", seq_buf.items);
+
+    // DELETING A WORD (Figure 9) ---------------------------------------------
+    try f.delete(2, 6);
+    // Original file is read only
+    try testing.expectEqualStrings("A large span of text", f._file_buf);
+    try testing.expectEqualStrings("", f._add_buf.items);
+    try testing.expectEqualSlices(
+        Piece,
+        &[_]Piece{
+            .{ .tag = .original, .start = 0, .len = 2 },
+            .{ .tag = .original, .start = 8, .len = 12 },
+        },
+        f._piece_tbl.items,
+    );
+    seq.reset();
+    seq_buf.clearRetainingCapacity();
+    try seq.collect(a, &seq_buf);
+    try testing.expectEqualStrings("A span of text", seq_buf.items);
 }
