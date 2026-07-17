@@ -29,6 +29,10 @@ const Piece = packed struct(u64) {
 
 pub const Err = error{
     FileTooLarge,
+    ZeroDelete,
+    ZeroInsert,
+    OutOfBoundsDelete,
+    OutOfBoundsInsert,
 };
 
 // Read-only buffer to the original file
@@ -77,19 +81,16 @@ fn deinit_testing(self: *Self, a: mem.Allocator) void {
 }
 
 // Derived/logical text
-fn writeSequence(
-    self: *const Self,
-    w: *std.Io.Writer,
-) !void {
+pub fn writeSequence(self: *const Self, w: *std.Io.Writer) !void {
     var it = Iterator{ .file = self, .piece_idx = 0 };
     while (it.next()) |span| {
         try w.writeAll(span);
     }
 }
 
-fn delete(self: *Self, start: FileSize, len: FileSize) !void {
-    if (len == 0) return error.InvalidRange;
-    const end = math.add(FileSize, start, len) catch return error.InvalidRange;
+pub fn delete(self: *Self, start: FileSize, len: FileSize) !void {
+    if (len == 0) return error.ZeroDelete;
+    const end = math.add(FileSize, start, len) catch return error.OutOfBoundsDelete;
     const pieces = self._piece_tbl.items;
 
     var first_piece_offset: FileSize = 0;
@@ -116,8 +117,8 @@ fn delete(self: *Self, start: FileSize, len: FileSize) !void {
             pos = piece_end;
         }
 
-        first_idx = maybe_first_idx orelse return error.InvalidRange;
-        last_idx = maybe_last_idx orelse return error.InvalidRange;
+        first_idx = maybe_first_idx orelse return error.OutOfBoundsDelete;
+        last_idx = maybe_last_idx orelse return error.OutOfBoundsDelete;
     }
 
     const first_piece = pieces[first_idx];
@@ -146,8 +147,8 @@ fn delete(self: *Self, start: FileSize, len: FileSize) !void {
 }
 
 // TODO: still mostly clankery, I won't understand this later
-fn insert(self: *Self, pos: FileSize, text: []const u8) !void {
-    if (text.len == 0) return error.InvalidRange;
+pub fn insert(self: *Self, pos: FileSize, text: []const u8) !void {
+    if (text.len == 0) return error.ZeroInsert;
     const pieces = self._piece_tbl.items;
     const add_buf = self._add_buf;
 
@@ -167,12 +168,12 @@ fn insert(self: *Self, pos: FileSize, text: []const u8) !void {
             }
             pos_cursor = piece_end;
         }
-        target_idx = maybe_target_idx orelse return error.InvalidRange;
+        target_idx = maybe_target_idx orelse return error.OutOfBoundsInsert;
     }
 
     const target = pieces[target_idx];
     const text_len =
-        math.cast(FileSize, text.len) orelse return error.FileTooLarge;
+        math.cast(FileSize, text.len) orelse return error.OutOfBoundsInsert;
 
     // If cursor is after most recently inserted, we can mutate piece in place
     if (offset == target.len and
@@ -324,7 +325,7 @@ test "deleting past end of file is invalid" {
     defer f.deinit_testing(a);
 
     try testing.expectError(
-        error.InvalidRange,
+        error.OutOfBoundsDelete,
         f.delete(2_000_000_000, 2_000_000_000),
     );
 }
@@ -337,7 +338,16 @@ test "empty deletes are invalid" {
     var f = try Self.init(a, Limits{}, "hi");
     defer f.deinit_testing(a);
 
-    try testing.expectError(error.InvalidRange, f.delete(0, 0));
+    try testing.expectError(error.ZeroDelete, f.delete(0, 0));
 }
 
-// TODO: insert tests
+test "inserting nothing is invalid" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    var f = try Self.init(a, Limits{}, "hi");
+    defer f.deinit_testing(a);
+
+    try testing.expectError(error.ZeroInsert, f.insert(0, ""));
+}
