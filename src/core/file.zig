@@ -76,8 +76,14 @@ fn deinit_testing(self: *Self, a: mem.Allocator) void {
 }
 
 // Derived/logical text
-fn sequence(self: *const Self) Iterator {
-    return Iterator{ .file = self, .piece_idx = 0 };
+fn writeSequence(
+    self: *const Self,
+    w: *std.Io.Writer,
+) !void {
+    var it = Iterator{ .file = self, .piece_idx = 0 };
+    while (it.next()) |span| {
+        try w.writeAll(span);
+    }
 }
 
 // Clanker generated - I do not understand this.
@@ -152,10 +158,6 @@ const Iterator = struct {
         return span;
     }
 
-    fn reset(self: *Iterator) void {
-        self.piece_idx = 0;
-    }
-
     // Collects spans into a single buffer
     fn collect(self: *Iterator, a: mem.Allocator, buf: *ArrayList(u8)) !void {
         while (self.next()) |span| {
@@ -172,7 +174,7 @@ test "Crowley paper tests" {
     var aa = std.heap.ArenaAllocator.init(ta);
     defer aa.deinit();
     const a = aa.allocator();
-    var seq_buf = try ArrayList(u8).initCapacity(a, 32);
+    var seq = std.Io.Writer.Allocating.init(a);
 
     // INITIAL STATE (Figure 8) -----------------------------------------------
     var f = try Self.init(a, Limits{}, "A large span of text");
@@ -184,13 +186,12 @@ test "Crowley paper tests" {
         &[_]Piece{.{
             .tag = .original,
             .start = 0,
-            .len = 20, // The paper says 19, but that looks to be an off by 1 error
+            .len = 20, // Paper says 19, but that looks to be an off by 1 error
         }},
         f._piece_tbl.items,
     );
-    var seq = f.sequence();
-    try seq.collect(a, &seq_buf);
-    try testing.expectEqualStrings("A large span of text", seq_buf.items);
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("A large span of text", seq.written());
 
     // DELETING A WORD (Figure 9) ---------------------------------------------
     try f.delete(2, 6);
@@ -205,8 +206,7 @@ test "Crowley paper tests" {
         },
         f._piece_tbl.items,
     );
-    seq.reset();
-    seq_buf.clearRetainingCapacity();
-    try seq.collect(a, &seq_buf);
-    try testing.expectEqualStrings("A span of text", seq_buf.items);
+    seq.clearRetainingCapacity();
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("A span of text", seq.written());
 }
