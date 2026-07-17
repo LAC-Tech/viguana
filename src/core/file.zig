@@ -7,6 +7,7 @@
 
 //---------------------------------------------------------------------- IMPORTS
 const std = @import("std");
+const heap = std.heap;
 const math = std.math;
 const mem = std.mem;
 const testing = std.testing;
@@ -36,16 +37,16 @@ _file_buf: []const u8,
 _add_buf: ArrayList(u8),
 _piece_tbl: ArrayList(Piece),
 
-pub fn predict_size(limits: Limits) usize {
+pub fn memory_needed(limits: Limits) usize {
     return (limits.new_chars_until_swap_write * @sizeOf(u8)) +
-        ((limits.inserts_and_undos_until_swap_write + 1) * @sizeOf(Piece));
+        ((limits.edits_until_swap_write + 1) * @sizeOf(Piece));
 }
 
 pub fn init(a: mem.Allocator, limits: Limits, file_buf: []const u8) !Self {
     var piece_tbl = try ArrayList(Piece).initCapacity(
         a,
         // + 1 because piece tables start with one entry already
-        limits.inserts_and_undos_until_swap_write + 1,
+        limits.edits_until_swap_write + 1,
     );
 
     try piece_tbl.appendBounded(.{
@@ -86,56 +87,149 @@ fn writeSequence(
     }
 }
 
-// Clanker generated - I do not understand this.
 fn delete(self: *Self, start: FileSize, len: FileSize) !void {
-    const end = start + len;
+    if (len == 0) return error.InvalidRange;
+    const end = math.add(FileSize, start, len) catch return error.InvalidRange;
     const pieces = self._piece_tbl.items;
 
-    var cursor: FileSize = 0;
-    // which piece contains the first deleted byte
-    var start_idx: usize = 0;
-    // how far into that piece the first deleted byte is
-    var start_offset: FileSize = 0;
-    // which piece contains the byte just past the deleted range
-    var end_idx: usize = 0;
-    // how far into that piece the deletion ends
-    var end_offset: FileSize = 0;
+    var first_piece_offset: FileSize = 0;
+    var last_piece_offset: FileSize = 0;
+    var first_idx: usize = 0;
+    var last_idx: usize = 0;
 
-    for (pieces, 0..) |p, p_idx| {
-        const p_len: FileSize = @intCast(p.len);
-        if (cursor + p_len > start) {
-            start_idx = p_idx;
-            start_offset = start - cursor;
+    {
+        var pos: FileSize = 0;
+        var maybe_first_idx: ?usize = null;
+        var maybe_last_idx: ?usize = null;
+
+        for (pieces, 0..) |p, i| {
+            const piece_end = pos + p.len;
+            if (start >= pos and start < piece_end) {
+                maybe_first_idx = i;
+                first_piece_offset = start - pos;
+            }
+            if (end > pos and end <= piece_end) {
+                maybe_last_idx = i;
+                last_piece_offset = end - pos;
+                break;
+            }
+            pos = piece_end;
         }
-        if (cursor + p_len >= end) {
-            end_idx = p_idx;
-            end_offset = end - cursor;
-            break;
-        }
-        cursor += p_len;
+
+        first_idx = maybe_first_idx orelse return error.InvalidRange;
+        last_idx = maybe_last_idx orelse return error.InvalidRange;
     }
 
-    // Copying before anything is mutated
-    const end_piece = pieces[end_idx];
-    self._piece_tbl.items[start_idx].len = start_offset;
-    if (end_idx > start_idx) {
-        const gap = end_idx - start_idx;
-        const rest = pieces.len - (end_idx + 1);
-        if (rest > 0) {
-            mem.copyForwards(
-                Piece,
-                self._piece_tbl.items[start_idx + 1 ..],
-                self._piece_tbl.items[end_idx + 1 ..],
-            );
-        }
-        self._piece_tbl.items = pieces[0 .. pieces.len - gap];
+    const first_piece = pieces[first_idx];
+    const last_piece = pieces[last_idx];
+
+    var buf: [2]Piece = undefined;
+    var replacements = ArrayList(Piece).initBuffer(&buf);
+
+    if (first_piece_offset > 0) {
+        var p = first_piece;
+        p.len = first_piece_offset;
+        try replacements.appendBounded(p);
     }
-    if (end_piece.len > end_offset) {
-        try self._piece_tbl.insertBounded(start_idx + 1, .{
-            .tag = end_piece.tag,
-            .start = end_piece.start + end_offset,
-            .len = end_piece.len - end_offset,
-        });
+    if (last_piece_offset < last_piece.len) {
+        var p = last_piece;
+        p.start += last_piece_offset;
+        p.len -= last_piece_offset;
+        try replacements.appendBounded(p);
+    }
+
+    try self._piece_tbl.replaceRangeBounded(
+        first_idx,
+        last_idx - first_idx + 1,
+        replacements.items,
+    );
+}
+
+// TODO: still mostly clankery, I won't understand this later
+fn insert(self: *Self, pos: FileSize, text: []const u8) !void {
+    if (text.len == 0) return error.InvalidRange;
+    const pieces = self._piece_tbl.items;
+    const add_buf = self._add_buf;
+
+    var target_idx: usize = 0;
+    var offset: FileSize = 0;
+
+    {
+        var pos_cursor: FileSize = 0;
+
+        var maybe_target_idx: ?usize = null;
+        for (pieces, 0..) |p, i| {
+            const piece_end = pos_cursor + p.len;
+            if (pos >= pos_cursor and pos <= piece_end) {
+                maybe_target_idx = i;
+                offset = pos - pos_cursor;
+                break;
+            }
+            pos_cursor = piece_end;
+        }
+        target_idx = maybe_target_idx orelse return error.InvalidRange;
+    }
+
+    const target = pieces[target_idx];
+    const text_len =
+        math.cast(FileSize, text.len) orelse return error.FileTooLarge;
+
+    // If cursor is after most recently inserted, we can mutate piece in place
+    if (offset == target.len and
+        target.tag == .add and
+        target.start + target.len == add_buf.items.len)
+    {
+        try self._add_buf.appendSliceBounded(text);
+        pieces[target_idx].len = math.add(
+            FileSize,
+            target.len,
+            text_len,
+        ) catch return error.FileTooLarge;
+
+        return;
+    }
+
+    const add_start =
+        math.cast(FileSize, add_buf.items.len) orelse return error.FileTooLarge;
+    try self._add_buf.appendSliceBounded(text);
+    const new_piece = Piece{ .tag = .add, .start = add_start, .len = text_len };
+
+    var buf: [3]Piece = undefined;
+    var replacements = ArrayList(Piece).initBuffer(&buf);
+
+    if (offset == 0) {
+        // Insert before target; nothing removed.
+        try replacements.appendBounded(new_piece);
+        try self._piece_tbl.replaceRangeBounded(
+            target_idx,
+            0,
+            replacements.items,
+        );
+    } else if (offset == target.len) {
+        // Insert after target; nothing removed.
+        try replacements.appendBounded(new_piece);
+        try self._piece_tbl.replaceRangeBounded(
+            target_idx + 1,
+            0,
+            replacements.items,
+        );
+    } else {
+        // Interior: split into head, new, tail.
+        var head = target;
+        head.len = offset;
+        try replacements.appendBounded(head);
+        try replacements.appendBounded(new_piece);
+
+        var tail = target;
+        tail.start += offset;
+        tail.len -= offset;
+        try replacements.appendBounded(tail);
+
+        try self._piece_tbl.replaceRangeBounded(
+            target_idx,
+            1,
+            replacements.items,
+        );
     }
 }
 
@@ -157,21 +251,14 @@ const Iterator = struct {
         self.piece_idx += 1;
         return span;
     }
-
-    // Collects spans into a single buffer
-    fn collect(self: *Iterator, a: mem.Allocator, buf: *ArrayList(u8)) !void {
-        while (self.next()) |span| {
-            try buf.appendSlice(a, span);
-        }
-    }
 };
 
 //------------------------------------------------------------------------ TESTS
 
-// Test is brittle; more of a recorded debugging session
+// This test is brittle; more of a recorded debugging session
 // Its purpose is to see if I am following the algorithm accurately
 test "Crowley paper tests" {
-    var aa = std.heap.ArenaAllocator.init(ta);
+    var aa = heap.ArenaAllocator.init(ta);
     defer aa.deinit();
     const a = aa.allocator();
     var seq = std.Io.Writer.Allocating.init(a);
@@ -195,7 +282,6 @@ test "Crowley paper tests" {
 
     // DELETING A WORD (Figure 9) ---------------------------------------------
     try f.delete(2, 6);
-    // Original file is read only
     try testing.expectEqualStrings("A large span of text", f._file_buf);
     try testing.expectEqualStrings("", f._add_buf.items);
     try testing.expectEqualSlices(
@@ -209,4 +295,49 @@ test "Crowley paper tests" {
     seq.clearRetainingCapacity();
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("A span of text", seq.written());
+
+    // INSERT A WORD (Figure 10) -----------------------------------------------
+    try f.insert(10, "English ");
+    try testing.expectEqualStrings("A large span of text", f._file_buf);
+    try testing.expectEqualStrings("English ", f._add_buf.items);
+    try testing.expectEqualSlices(
+        Piece,
+        &[_]Piece{
+            .{ .tag = .original, .start = 0, .len = 2 },
+            .{ .tag = .original, .start = 8, .len = 8 },
+            .{ .tag = .add, .start = 0, .len = 8 },
+            .{ .tag = .original, .start = 16, .len = 4 },
+        },
+        f._piece_tbl.items,
+    );
+    seq.clearRetainingCapacity();
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("A span of English text", seq.written());
 }
+
+test "deleting past end of file is invalid" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    var f = try Self.init(a, Limits{}, "hi");
+    defer f.deinit_testing(a);
+
+    try testing.expectError(
+        error.InvalidRange,
+        f.delete(2_000_000_000, 2_000_000_000),
+    );
+}
+
+test "empty deletes are invalid" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    var f = try Self.init(a, Limits{}, "hi");
+    defer f.deinit_testing(a);
+
+    try testing.expectError(error.InvalidRange, f.delete(0, 0));
+}
+
+// TODO: insert tests

@@ -23,7 +23,7 @@ fn init(
     limits: Limits,
     file_buf: []const u8,
 ) (File.Err || mem.Allocator.Error)!Self {
-    const heap_mem_size = File.predict_size(limits.file);
+    const heap_mem_size = File.memory_needed(limits.file);
 
     const heap_mem = try one_shot_allocator.alloc(u8, heap_mem_size);
     var fba = heap.FixedBufferAllocator.init(heap_mem);

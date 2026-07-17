@@ -9,7 +9,7 @@ pub const File = struct {
 
     /// I think this is neovim's `undolevels`
     // TODO: ludicrously small because I want to trigger bad behaviour ASAP
-    inserts_and_undos_until_swap_write: usize = 8,
+    edits_until_swap_write: usize = 8,
 };
 
 file: File = File{},
