@@ -23,6 +23,37 @@ const Piece = packed struct(u64) {
     start: Limits.Size,
     len: Limits.Size,
     _reserved: u1 = 0,
+
+    fn shift_start(self: Piece, offset: Limits.Size) Piece {
+        var result = self;
+        result.start += offset;
+        result.len -= offset;
+        return result;
+    }
+};
+
+// A range for an operation on a file
+const Range = struct {
+    const InitErr = error{ RangeZeroLen, RangeTooLong };
+
+    // conceptually I believe this is the cursor position
+    start: Limits.Size,
+    // number of bytes
+    len: Limits.Size,
+    // end cursor position
+    // computing this might overflow so better to just do it once
+    end: Limits.Size,
+
+    fn init(start: Limits.Size, len: Limits.Size) InitErr!Range {
+        if (len == 0) return error.RangeZeroLen;
+        const end = math.add(
+            Limits.Size,
+            start,
+            len,
+        ) catch return error.RangeTooLong;
+
+        return .{ .start = start, .len = len, .end = end };
+    }
 };
 
 pub const Err = struct {
@@ -37,7 +68,7 @@ pub const Err = struct {
 
     const Insert = error{
         InsertZero,
-        InsertionOutOfBounds,
+        InsertOutOfBounds,
         InsertTextTooLarge,
     };
     const Alloc = mem.Allocator.Error;
@@ -85,7 +116,7 @@ pub fn init(
 }
 
 // Only used to prevent leak reports in tests
-// In practice all freeing and allocation is done (and test) at the top level
+// In practice all freeing and allocation is done (and tested) at the top level
 // Saves us allocating a buf, creating an fba, and destroying it each test.
 fn deinit_testing(self: *Self, a: mem.Allocator) void {
     self._add_buf.deinit(a);
@@ -105,12 +136,10 @@ pub fn delete(
     start: Limits.Size,
     len: Limits.Size,
 ) (Err.Delete || Err.Alloc)!void {
-    if (len == 0) return error.DeleteZero;
-    const end = math.add(
-        Limits.Size,
-        start,
-        len,
-    ) catch return error.DeleteOutOfBounds;
+    const range = Range.init(start, len) catch |err| switch (err) {
+        error.RangeZeroLen => return error.DeleteZero,
+        error.RangeTooLong => return error.DeleteOutOfBounds,
+    };
     const pieces = self._piece_tbl.items;
 
     var first_piece_offset: Limits.Size = 0;
@@ -121,22 +150,22 @@ pub fn delete(
     var replacements = ArrayList(Piece).initBuffer(&buf);
 
     {
-        var pos: Limits.Size = 0;
+        var cursor: Limits.Size = 0;
         var maybe_first_idx: ?usize = null;
         var maybe_last_idx: ?usize = null;
 
         for (pieces, 0..) |p, i| {
-            const piece_end = pos + p.len;
-            if (start >= pos and start < piece_end) {
+            const piece_end = cursor + p.len;
+            if (range.start >= cursor and range.start < piece_end) {
                 maybe_first_idx = i;
-                first_piece_offset = start - pos;
+                first_piece_offset = range.start - cursor;
             }
-            if (end > pos and end <= piece_end) {
+            if (range.end > cursor and range.end <= piece_end) {
                 maybe_last_idx = i;
-                last_piece_offset = end - pos;
+                last_piece_offset = range.end - cursor;
                 break;
             }
-            pos = piece_end;
+            cursor = piece_end;
         }
 
         first_idx = maybe_first_idx orelse return error.DeleteOutOfBounds;
@@ -152,9 +181,7 @@ pub fn delete(
         try replacements.appendBounded(p);
     }
     if (last_piece_offset < last_piece.len) {
-        var p = last_piece;
-        p.start += last_piece_offset;
-        p.len -= last_piece_offset;
+        const p = last_piece.shift_start(last_piece_offset);
         try replacements.appendBounded(p);
     }
 
@@ -171,9 +198,15 @@ pub fn insert(
     pos: Limits.Size,
     text: []const u8,
 ) (Err.Insert || Err.Alloc)!void {
-    if (text.len == 0) return error.InsertZero;
-    const text_len =
-        math.cast(Limits.Size, text.len) orelse return error.InsertTextTooLarge;
+    const text_len = math.cast(
+        Limits.Size,
+        text.len,
+    ) orelse return error.InsertTextTooLarge;
+
+    const range = Range.init(pos, text_len) catch |err| switch (err) {
+        error.RangeZeroLen => return error.InsertZero,
+        error.RangeTooLong => return error.InsertOutOfBounds,
+    };
 
     const pieces = self._piece_tbl.items;
 
@@ -184,20 +217,20 @@ pub fn insert(
     var replacements = ArrayList(Piece).initBuffer(&buf);
 
     {
-        var pos_cursor: Limits.Size = 0;
+        var cursor: Limits.Size = 0;
         var maybe_target_idx: ?usize = null;
 
         for (pieces, 0..) |p, i| {
-            const piece_end = pos_cursor + p.len;
-            if (pos >= pos_cursor and pos <= piece_end) {
+            const piece_end = cursor + p.len;
+            if (range.start >= cursor and range.start <= piece_end) {
                 maybe_target_idx = i;
-                offset = pos - pos_cursor;
+                offset = range.start - cursor;
                 break;
             }
-            pos_cursor = piece_end;
+            cursor = piece_end;
         }
 
-        target_idx = maybe_target_idx orelse return error.InsertionOutOfBounds;
+        target_idx = maybe_target_idx orelse return error.InsertOutOfBounds;
     }
 
     const target = pieces[target_idx];
@@ -209,7 +242,7 @@ pub fn insert(
         const new_len = math.add(
             Limits.Size,
             target.len,
-            text_len,
+            range.len,
         ) catch return error.InsertTextTooLarge;
 
         try add_buf.appendSliceBounded(text);
@@ -220,9 +253,9 @@ pub fn insert(
     const add_start = math.cast(
         Limits.Size,
         add_buf.items.len,
-    ) orelse unreachable;
+    ) orelse unreachable; // TODO: proper error
     try add_buf.appendSliceBounded(text);
-    const new_piece = Piece{ .tag = .add, .start = add_start, .len = text_len };
+    const new_piece = Piece{ .tag = .add, .start = add_start, .len = range.len };
 
     if (offset == 0) {
         // Insert before target; nothing removed.
@@ -247,9 +280,7 @@ pub fn insert(
         try replacements.appendBounded(head);
         try replacements.appendBounded(new_piece);
 
-        var tail = target;
-        tail.start += offset;
-        tail.len -= offset;
+        const tail = target.shift_start(offset);
         try replacements.appendBounded(tail);
 
         try self._piece_tbl.replaceRangeBounded(
