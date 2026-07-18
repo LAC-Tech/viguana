@@ -136,7 +136,7 @@ pub fn delete(
     start: Limits.Size,
     len: Limits.Size,
 ) (Err.Delete || Err.Alloc)!void {
-    const range = Range.init(start, len) catch |err| switch (err) {
+    const delete_range = Range.init(start, len) catch |err| switch (err) {
         error.RangeZeroLen => return error.DeleteZero,
         error.RangeTooLong => return error.DeleteOutOfBounds,
     };
@@ -155,17 +155,17 @@ pub fn delete(
         var maybe_last_idx: ?usize = null;
 
         for (pieces, 0..) |p, i| {
-            const piece_end = cursor + p.len;
-            if (range.start >= cursor and range.start < piece_end) {
+            const r = Range.init(cursor, p.len) catch unreachable;
+            if (r.end > delete_range.start) {
                 maybe_first_idx = i;
-                first_piece_offset = range.start - cursor;
+                first_piece_offset = delete_range.start - r.start;
             }
-            if (range.end > cursor and range.end <= piece_end) {
+            if (delete_range.end > r.start) {
                 maybe_last_idx = i;
-                last_piece_offset = range.end - cursor;
+                last_piece_offset = delete_range.end - r.start;
                 break;
             }
-            cursor = piece_end;
+            cursor += p.len;
         }
 
         first_idx = maybe_first_idx orelse return error.DeleteOutOfBounds;
@@ -203,7 +203,7 @@ pub fn insert(
         text.len,
     ) orelse return error.InsertTextTooLarge;
 
-    const range = Range.init(pos, text_len) catch |err| switch (err) {
+    const insert_range = Range.init(pos, text_len) catch |err| switch (err) {
         error.RangeZeroLen => return error.InsertZero,
         error.RangeTooLong => return error.InsertOutOfBounds,
     };
@@ -221,13 +221,13 @@ pub fn insert(
         var maybe_target_idx: ?usize = null;
 
         for (pieces, 0..) |p, i| {
-            const piece_end = cursor + p.len;
-            if (range.start >= cursor and range.start <= piece_end) {
+            const r = Range.init(cursor, p.len) catch unreachable;
+            if (r.end > insert_range.start) {
                 maybe_target_idx = i;
-                offset = range.start - cursor;
+                offset = insert_range.start - r.start;
                 break;
             }
-            cursor = piece_end;
+            cursor += p.len;
         }
 
         target_idx = maybe_target_idx orelse return error.InsertOutOfBounds;
@@ -242,7 +242,7 @@ pub fn insert(
         const new_len = math.add(
             Limits.Size,
             target.len,
-            range.len,
+            insert_range.len,
         ) catch return error.InsertTextTooLarge;
 
         try add_buf.appendSliceBounded(text);
@@ -255,7 +255,7 @@ pub fn insert(
         add_buf.items.len,
     ) orelse unreachable; // TODO: proper error
     try add_buf.appendSliceBounded(text);
-    const new_piece = Piece{ .tag = .add, .start = add_start, .len = range.len };
+    const new_piece = Piece{ .tag = .add, .start = add_start, .len = insert_range.len };
 
     if (offset == 0) {
         // Insert before target; nothing removed.
