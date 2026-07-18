@@ -1,3 +1,5 @@
 - Finish insert/delete refactor
-- More abstract methods on File, ie
-    - delete until char, n times (ie dd would be delete until \n 1)
+- Implement `delete until char n times' this unlocks
+    - dd (delete until \n 1)
+    - dw (delete until whitespace 1)
+    - d4w (delete until whitespace 4)
