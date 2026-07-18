@@ -7,6 +7,7 @@
 
 //---------------------------------------------------------------------- IMPORTS
 const std = @import("std");
+const debug = std.debug;
 const heap = std.heap;
 const math = std.math;
 const mem = std.mem;
@@ -17,9 +18,32 @@ const Io = std.Io;
 const Limits = @import("limits.zig").File;
 //--------------------------------------------------------------- IMPLEMENTATION
 
-// A range for an operation on a file
+// We treat request to do frivilous things like "delete 0 characters" as errors
+// Silently doing nothing hides bugs - why is the caller sending bad data?
+pub const Err = struct {
+    pub const Init = error{
+        OriginalFileTooLarge,
+    };
+
+    const Delete = error{
+        DeleteZero,
+        DeleteOutOfBounds,
+    };
+
+    const Insert = error{
+        InsertZero,
+        InsertOutOfBounds,
+        InsertTextTooLarge, // TODO: I think this is redundant
+    };
+    const Alloc = mem.Allocator.Error;
+};
+
+/// A range for an operation on a file
 const Range = packed struct(u62) {
-    const InitErr = error{ RangeZeroLen, RangeTooLong };
+    const InitErr = error{
+        RangeZeroLen,
+        RangeTooLong,
+    };
 
     /// conceptually I believe this is the cursor position
     start: Limits.Size,
@@ -62,24 +86,6 @@ const Piece = packed struct(u64) {
     tag: enum(u1) { original, add },
     _reserved: u1 = 0,
     range: Range,
-};
-
-pub const Err = struct {
-    pub const Init = error{
-        OriginalFileTooLarge,
-    };
-
-    const Delete = error{
-        DeleteZero,
-        DeleteOutOfBounds,
-    };
-
-    const Insert = error{
-        InsertZero,
-        InsertOutOfBounds,
-        InsertTextTooLarge,
-    };
-    const Alloc = mem.Allocator.Error;
 };
 
 const Self = @This();
@@ -126,14 +132,6 @@ pub fn init(
         ),
         ._piece_tbl = piece_tbl,
     };
-}
-
-// Only used to prevent leak reports in tests
-// In practice all freeing and allocation is done (and tested) at the top level
-// Saves us allocating a buf, creating an fba, and destroying it each test.
-fn deinit_testing(self: *Self, a: mem.Allocator) void {
-    self._add_buf.deinit(a);
-    self._piece_tbl.deinit(a);
 }
 
 // Derived/logical text
@@ -226,14 +224,13 @@ pub fn insert(
     const pieces = self._piece_tbl.items;
 
     var add_buf = &self._add_buf;
-    var target_idx: usize = 0;
     var offset: Limits.Size = 0;
     var buf: [3]Piece = undefined;
     var replacements = ArrayList(Piece).initBuffer(&buf);
 
+    var maybe_target_idx: ?usize = null;
     {
         var cursor: Limits.Size = 0;
-        var maybe_target_idx: ?usize = null;
 
         for (pieces, 0..) |p, i| {
             const r = Range.init(cursor, p.range.len) catch unreachable;
@@ -244,11 +241,18 @@ pub fn insert(
             }
             cursor += p.range.len;
         }
-
-        target_idx = maybe_target_idx orelse return error.InsertOutOfBounds;
     }
 
+    const target_idx = if (maybe_target_idx) |i| i else {
+        // Assuming if we don't find the target idx, the piece table is empty
+        debug.assert(pieces.len == 0);
+        try self._add_buf.appendSliceBounded(text);
+        try self._piece_tbl.appendBounded(.{ .tag = .add, .range = insert_range });
+        return;
+    };
+
     const target = pieces[target_idx];
+
     // If cursor is after most recently inserted, we can mutate piece in place
     if (offset == target.range.len and
         target.tag == .add and
@@ -409,7 +413,6 @@ test "deleting past end of file is invalid" {
     const a = aa.allocator();
 
     var f = try Self.init(a, Limits{}, "hi");
-    defer f.deinit_testing(a);
 
     try testing.expectError(
         error.DeleteOutOfBounds,
@@ -423,7 +426,6 @@ test "empty deletes are invalid" {
     const a = aa.allocator();
 
     var f = try Self.init(a, Limits{}, "hi");
-    defer f.deinit_testing(a);
 
     try testing.expectError(error.DeleteZero, f.delete(0, 0));
 }
@@ -434,7 +436,40 @@ test "inserting nothing is invalid" {
     const a = aa.allocator();
 
     var f = try Self.init(a, Limits{}, "hi");
-    defer f.deinit_testing(a);
 
     try testing.expectError(error.InsertZero, f.insert(0, ""));
+}
+
+test "empty starting file" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+    var seq = std.Io.Writer.Allocating.init(a);
+
+    var f = try Self.init(a, Limits{}, "");
+
+    try f.insert(0, "hello world");
+    try f.writeSequence(&seq.writer);
+}
+
+test "initialises on max size file size" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    const original_file = try a.alloc(u8, math.maxInt(Limits.Size));
+    _ = try Self.init(a, Limits{}, original_file);
+}
+
+test "gracefully errors if file is too large" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    const original_file = try a.alloc(u8, math.maxInt(Limits.Size) + 1);
+    try testing.expectError(error.OriginalFileTooLarge, Self.init(
+        a,
+        Limits{},
+        original_file,
+    ));
 }

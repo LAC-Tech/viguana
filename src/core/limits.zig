@@ -8,7 +8,7 @@ pub const File = struct {
 
     /// I think this is neovim's `updatecount`
     // TODO: ludicrously small because I want to trigger bad behaviour ASAP
-    new_chars_until_swap_write: Size = 8,
+    new_chars_until_swap_write: Size = 16,
 
     /// I think this is neovim's `undolevels`
     // TODO: ludicrously small because I want to trigger bad behaviour ASAP
