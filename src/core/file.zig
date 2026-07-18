@@ -82,10 +82,42 @@ const Range = packed struct(u62) {
     }
 };
 
-const Piece = packed struct(u64) {
-    tag: enum(u1) { original, add },
-    _reserved: u1 = 0,
-    range: Range,
+const PieceTbl = struct {
+    const Piece = packed struct(u64) {
+        tag: enum(u1) { original, add },
+        _reserved: u1 = 0,
+        range: Range,
+    };
+
+    _tbl: ArrayList(Piece),
+    // TODO: should be possible to calculate this? would make some checks easier
+    //projected_len: usize = 0,
+
+    fn init(a: mem.Allocator, limits: Limits, file_buf_len: usize) !@This() {
+        var tbl = try ArrayList(Piece).initCapacity(
+            a,
+            // + 1 because piece tables start with one entry already
+            limits.edits_until_swap_write + 1,
+        );
+        const initial_range =
+            if (Range.initUsizeLen(0, file_buf_len)) |r| r else |err| switch (err) {
+                error.RangeZeroLen => null,
+                error.RangeTooLong => return error.OriginalFileTooLarge,
+            };
+
+        if (initial_range) |r| {
+            try tbl.appendBounded(.{ .tag = .original, .range = r });
+        }
+
+        return .{ ._tbl = tbl };
+    }
+
+    fn create_add(start: Limits.Size, len: Limits.Size) Range.InitErr!Piece {
+        return .{
+            .tag = .add,
+            .range = try Range.init(start, len),
+        };
+    }
 };
 
 const Self = @This();
@@ -94,11 +126,11 @@ const Self = @This();
 _file_buf: []const u8,
 /// Append only buffer to a temp file
 _add_buf: ArrayList(u8),
-_piece_tbl: ArrayList(Piece),
+_pieces: PieceTbl,
 
 pub fn memory_needed(limits: Limits) usize {
     return (limits.new_chars_until_swap_write * @sizeOf(u8)) +
-        ((limits.edits_until_swap_write + 1) * @sizeOf(Piece));
+        ((limits.edits_until_swap_write + 1) * @sizeOf(PieceTbl.Piece));
 }
 
 pub fn init(
@@ -106,31 +138,13 @@ pub fn init(
     limits: Limits,
     file_buf: []const u8,
 ) (Err.Init || Err.Alloc)!Self {
-    var piece_tbl = try ArrayList(Piece).initCapacity(
-        a,
-        // + 1 because piece tables start with one entry already
-        limits.edits_until_swap_write + 1,
-    );
-
-    // TODO: fix this. if the range is zero (ie empty file), just don't append
-    // an initial piece
-    const initial_range =
-        if (Range.initUsizeLen(0, file_buf.len)) |r| r else |err| switch (err) {
-            error.RangeZeroLen => null,
-            error.RangeTooLong => return error.OriginalFileTooLarge,
-        };
-
-    if (initial_range) |r| {
-        try piece_tbl.appendBounded(.{ .tag = .original, .range = r });
-    }
-
     return .{
         ._file_buf = file_buf,
         ._add_buf = try ArrayList(u8).initCapacity(
             a,
             limits.new_chars_until_swap_write,
         ),
-        ._piece_tbl = piece_tbl,
+        ._pieces = try PieceTbl.init(a, limits, file_buf.len),
     };
 }
 
@@ -151,21 +165,21 @@ pub fn delete(
         error.RangeZeroLen => return error.DeleteZero,
         error.RangeTooLong => return error.DeleteOutOfBounds,
     };
-    const pieces = self._piece_tbl.items;
+    const pieces = self._pieces;
 
     var first_piece_offset: Limits.Size = 0;
     var last_piece_offset: Limits.Size = 0;
     var first_idx: usize = 0;
     var last_idx: usize = 0;
-    var buf: [2]Piece = undefined;
-    var replacements = ArrayList(Piece).initBuffer(&buf);
+    var buf: [2]PieceTbl.Piece = undefined;
+    var replacements = ArrayList(PieceTbl.Piece).initBuffer(&buf);
 
     {
         var cursor: Limits.Size = 0;
         var maybe_first_idx: ?usize = null;
         var maybe_last_idx: ?usize = null;
 
-        for (pieces, 0..) |p, i| {
+        for (pieces._tbl.items, 0..) |p, i| {
             const r = Range.init(cursor, p.range.len) catch unreachable;
             if (r.end() > delete_range.start) {
                 maybe_first_idx = i;
@@ -183,8 +197,8 @@ pub fn delete(
         last_idx = maybe_last_idx orelse return error.DeleteOutOfBounds;
     }
 
-    const first_piece = pieces[first_idx];
-    const last_piece = pieces[last_idx];
+    const first_piece = pieces._tbl.items[first_idx];
+    const last_piece = pieces._tbl.items[last_idx];
 
     if (first_piece_offset > 0) {
         var p = first_piece;
@@ -198,7 +212,7 @@ pub fn delete(
         try replacements.appendBounded(p);
     }
 
-    try self._piece_tbl.replaceRangeBounded(
+    try self._pieces._tbl.replaceRangeBounded(
         first_idx,
         last_idx - first_idx + 1,
         replacements.items,
@@ -221,12 +235,11 @@ pub fn insert(
         error.RangeTooLong => return error.InsertOutOfBounds,
     };
 
-    const pieces = self._piece_tbl.items;
+    const pieces = self._pieces._tbl.items;
 
-    var add_buf = &self._add_buf;
     var offset: Limits.Size = 0;
-    var buf: [3]Piece = undefined;
-    var replacements = ArrayList(Piece).initBuffer(&buf);
+    var buf: [3]PieceTbl.Piece = undefined;
+    var replacements = ArrayList(PieceTbl.Piece).initBuffer(&buf);
 
     var maybe_target_idx: ?usize = null;
     {
@@ -247,7 +260,7 @@ pub fn insert(
         // Assuming if we don't find the target idx, the piece table is empty
         debug.assert(pieces.len == 0);
         try self._add_buf.appendSliceBounded(text);
-        try self._piece_tbl.appendBounded(.{ .tag = .add, .range = insert_range });
+        try self._pieces._tbl.appendBounded(.{ .tag = .add, .range = insert_range });
         return;
     };
 
@@ -256,7 +269,7 @@ pub fn insert(
     // If cursor is after most recently inserted, we can mutate piece in place
     if (offset == target.range.len and
         target.tag == .add and
-        target.range.end() == add_buf.items.len)
+        target.range.end() == self._add_buf.items.len)
     {
         const new_len = math.add(
             Limits.Size,
@@ -264,33 +277,28 @@ pub fn insert(
             insert_range.len,
         ) catch return error.InsertTextTooLarge;
 
-        try add_buf.appendSliceBounded(text);
+        try self._add_buf.appendSliceBounded(text);
         pieces[target_idx].range = target.range.set_len(new_len) catch unreachable;
         return;
     }
 
     const add_start = math.cast(
         Limits.Size,
-        add_buf.items.len,
+        self._add_buf.items.len,
     ) orelse unreachable; // TODO: proper error
 
-    // TODO: construct the range
-    const new_piece =
-        Piece{
-            .tag = .add,
-            .range = Range.init(add_start, insert_range.len) catch |err| {
-                switch (err) {
-                    error.RangeZeroLen => unreachable,
-                    error.RangeTooLong => return error.InsertTextTooLarge,
-                }
-            },
-        };
+    const new_piece = PieceTbl.create_add(add_start, insert_range.len) catch |err| {
+        switch (err) {
+            error.RangeZeroLen => unreachable,
+            error.RangeTooLong => return error.InsertTextTooLarge,
+        }
+    };
 
-    try add_buf.appendSliceBounded(text);
+    try self._add_buf.appendSliceBounded(text);
     if (offset == 0) {
         // Insert before target; nothing removed.
         try replacements.appendBounded(new_piece);
-        try self._piece_tbl.replaceRangeBounded(
+        try self._pieces._tbl.replaceRangeBounded(
             target_idx,
             0,
             replacements.items,
@@ -298,7 +306,7 @@ pub fn insert(
     } else if (offset == target.range.len) {
         // Insert after target; nothing removed.
         try replacements.appendBounded(new_piece);
-        try self._piece_tbl.replaceRangeBounded(
+        try self._pieces._tbl.replaceRangeBounded(
             target_idx + 1,
             0,
             replacements.items,
@@ -314,7 +322,7 @@ pub fn insert(
         tail.range = tail.range.shift_start(offset) catch unreachable;
         try replacements.appendBounded(tail);
 
-        try self._piece_tbl.replaceRangeBounded(
+        try self._pieces._tbl.replaceRangeBounded(
             target_idx,
             1,
             replacements.items,
@@ -328,7 +336,7 @@ const Iterator = struct {
 
     /// Returns next contiguous span of bytes
     fn next(self: *Iterator) ?[]const u8 {
-        const pieces = self.file._piece_tbl.items;
+        const pieces = self.file._pieces._tbl.items;
         if (self.piece_idx >= pieces.len) return null;
         const piece = pieces[self.piece_idx];
         const buf = switch (piece.tag) {
@@ -359,15 +367,15 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("", f._add_buf.items);
     try testing.expectEqual(0, f._add_buf.items.len);
     try testing.expectEqualSlices(
-        Piece,
-        &[_]Piece{.{
+        PieceTbl.Piece,
+        &[_]PieceTbl.Piece{.{
             .tag = .original,
             .range = try Range.init(
                 0,
                 20, // Paper says 19, but that looks to be an off by 1 error
             ),
         }},
-        f._piece_tbl.items,
+        f._pieces._tbl.items,
     );
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("A large span of text", seq.written());
@@ -377,12 +385,12 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("A large span of text", f._file_buf);
     try testing.expectEqualStrings("", f._add_buf.items);
     try testing.expectEqualSlices(
-        Piece,
-        &[_]Piece{
+        PieceTbl.Piece,
+        &[_]PieceTbl.Piece{
             .{ .tag = .original, .range = .{ .start = 0, .len = 2 } },
             .{ .tag = .original, .range = .{ .start = 8, .len = 12 } },
         },
-        f._piece_tbl.items,
+        f._pieces._tbl.items,
     );
     seq.clearRetainingCapacity();
     try f.writeSequence(&seq.writer);
@@ -393,14 +401,14 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("A large span of text", f._file_buf);
     try testing.expectEqualStrings("English ", f._add_buf.items);
     try testing.expectEqualSlices(
-        Piece,
-        &[_]Piece{
+        PieceTbl.Piece,
+        &[_]PieceTbl.Piece{
             .{ .tag = .original, .range = .{ .start = 0, .len = 2 } },
             .{ .tag = .original, .range = .{ .start = 8, .len = 8 } },
             .{ .tag = .add, .range = .{ .start = 0, .len = 8 } },
             .{ .tag = .original, .range = .{ .start = 16, .len = 4 } },
         },
-        f._piece_tbl.items,
+        f._pieces._tbl.items,
     );
     seq.clearRetainingCapacity();
     try f.writeSequence(&seq.writer);
@@ -467,9 +475,8 @@ test "gracefully errors if file is too large" {
     const a = aa.allocator();
 
     const original_file = try a.alloc(u8, math.maxInt(Limits.Size) + 1);
-    try testing.expectError(error.OriginalFileTooLarge, Self.init(
-        a,
-        Limits{},
-        original_file,
-    ));
+    try testing.expectError(
+        error.OriginalFileTooLarge,
+        Self.init(a, Limits{}, original_file),
+    );
 }
