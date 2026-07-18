@@ -16,44 +16,52 @@ const ArrayList = std.ArrayList;
 const Io = std.Io;
 const Limits = @import("limits.zig").File;
 //--------------------------------------------------------------- IMPLEMENTATION
-const Self = @This();
-
-const Piece = packed struct(u64) {
-    tag: enum(u1) { original, add },
-    start: Limits.Size,
-    len: Limits.Size,
-    _reserved: u1 = 0,
-
-    fn shift_start(self: Piece, offset: Limits.Size) Piece {
-        var result = self;
-        result.start += offset;
-        result.len -= offset;
-        return result;
-    }
-};
 
 // A range for an operation on a file
-const Range = struct {
+const Range = packed struct(u62) {
     const InitErr = error{ RangeZeroLen, RangeTooLong };
 
-    // conceptually I believe this is the cursor position
+    /// conceptually I believe this is the cursor position
     start: Limits.Size,
-    // number of bytes
+    /// number of bytes.
+    /// do not set it directly, use `setLen` to catch range errors early
     len: Limits.Size,
-    // end cursor position
-    // computing this might overflow so better to just do it once
-    end: Limits.Size,
 
-    fn init(start: Limits.Size, len: Limits.Size) InitErr!Range {
+    fn init(start: Limits.Size, len: Limits.Size) InitErr!@This() {
         if (len == 0) return error.RangeZeroLen;
-        const end = math.add(
+        _ = math.add(
             Limits.Size,
             start,
             len,
         ) catch return error.RangeTooLong;
-
-        return .{ .start = start, .len = len, .end = end };
+        return .{ .start = start, .len = len };
     }
+
+    fn initUsizeLen(start: Limits.Size, len: usize) InitErr!@This() {
+        const cast_len =
+            math.cast(Limits.Size, len) orelse return error.RangeTooLong;
+
+        return @This().init(start, cast_len);
+    }
+
+    /// Safe to compute if Range created through init
+    fn end(self: @This()) Limits.Size {
+        return self.start + self.len;
+    }
+
+    fn shift_start(self: @This(), offset: Limits.Size) InitErr!@This() {
+        return @This().init(self.start + offset, self.len - offset);
+    }
+
+    fn set_len(self: @This(), new_len: Limits.Size) InitErr!@This() {
+        return @This().init(self.start, new_len);
+    }
+};
+
+const Piece = packed struct(u64) {
+    tag: enum(u1) { original, add },
+    _reserved: u1 = 0,
+    range: Range,
 };
 
 pub const Err = struct {
@@ -73,6 +81,8 @@ pub const Err = struct {
     };
     const Alloc = mem.Allocator.Error;
 };
+
+const Self = @This();
 
 // Read-only buffer to the original file
 _file_buf: []const u8,
@@ -96,13 +106,20 @@ pub fn init(
         limits.edits_until_swap_write + 1,
     );
 
+    // TODO: fix this. if the range is zero (ie empty file), just don't append
+    // an initial piece
+    const initial_range: ?Range = Range.initUsizeLen(
+        0,
+        file_buf.len,
+    ) catch |err| {
+        switch (err) {
+            error.RangeZeroLen => null,
+            error.RangeTooLong => return error.OriginalFileTooLarge,
+        }
+    };
     try piece_tbl.appendBounded(.{
         .tag = .original,
-        .start = 0,
-        .len = math.cast(
-            Limits.Size,
-            file_buf.len,
-        ) orelse return error.OriginalFileTooLarge,
+        .range = initial_range,
     });
 
     return .{
@@ -155,17 +172,17 @@ pub fn delete(
         var maybe_last_idx: ?usize = null;
 
         for (pieces, 0..) |p, i| {
-            const r = Range.init(cursor, p.len) catch unreachable;
-            if (r.end > delete_range.start) {
+            const r = Range.init(cursor, p.range.len) catch unreachable;
+            if (r.end() > delete_range.start) {
                 maybe_first_idx = i;
                 first_piece_offset = delete_range.start - r.start;
             }
-            if (delete_range.end > r.start) {
+            if (delete_range.end() > r.start) {
                 maybe_last_idx = i;
-                last_piece_offset = delete_range.end - r.start;
+                last_piece_offset = delete_range.end() - r.start;
                 break;
             }
-            cursor += p.len;
+            cursor += p.range.len;
         }
 
         first_idx = maybe_first_idx orelse return error.DeleteOutOfBounds;
@@ -177,11 +194,13 @@ pub fn delete(
 
     if (first_piece_offset > 0) {
         var p = first_piece;
-        p.len = first_piece_offset;
+        p.range = p.range.set_len(first_piece_offset) catch unreachable;
         try replacements.appendBounded(p);
     }
-    if (last_piece_offset < last_piece.len) {
-        const p = last_piece.shift_start(last_piece_offset);
+    if (last_piece_offset < last_piece.range.len) {
+        var p = first_piece;
+        p.range =
+            last_piece.range.shift_start(last_piece_offset) catch unreachable;
         try replacements.appendBounded(p);
     }
 
@@ -221,13 +240,13 @@ pub fn insert(
         var maybe_target_idx: ?usize = null;
 
         for (pieces, 0..) |p, i| {
-            const r = Range.init(cursor, p.len) catch unreachable;
-            if (r.end > insert_range.start) {
+            const r = Range.init(cursor, p.range.len) catch unreachable;
+            if (r.end() > insert_range.start) {
                 maybe_target_idx = i;
                 offset = insert_range.start - r.start;
                 break;
             }
-            cursor += p.len;
+            cursor += p.range.len;
         }
 
         target_idx = maybe_target_idx orelse return error.InsertOutOfBounds;
@@ -235,18 +254,18 @@ pub fn insert(
 
     const target = pieces[target_idx];
     // If cursor is after most recently inserted, we can mutate piece in place
-    if (offset == target.len and
+    if (offset == target.range.len and
         target.tag == .add and
-        target.start + target.len == add_buf.items.len)
+        target.range.end() == add_buf.items.len)
     {
         const new_len = math.add(
             Limits.Size,
-            target.len,
+            target.range.len,
             insert_range.len,
         ) catch return error.InsertTextTooLarge;
 
         try add_buf.appendSliceBounded(text);
-        pieces[target_idx].len = new_len;
+        pieces[target_idx].range = target.range.set_len(new_len) catch unreachable;
         return;
     }
 
@@ -255,7 +274,9 @@ pub fn insert(
         add_buf.items.len,
     ) orelse unreachable; // TODO: proper error
     try add_buf.appendSliceBounded(text);
-    const new_piece = Piece{ .tag = .add, .start = add_start, .len = insert_range.len };
+
+    const new_piece =
+        Piece{ .tag = .add, .start = add_start, .len = insert_range.len };
 
     if (offset == 0) {
         // Insert before target; nothing removed.
