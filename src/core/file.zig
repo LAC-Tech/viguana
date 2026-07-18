@@ -108,19 +108,15 @@ pub fn init(
 
     // TODO: fix this. if the range is zero (ie empty file), just don't append
     // an initial piece
-    const initial_range: ?Range = Range.initUsizeLen(
-        0,
-        file_buf.len,
-    ) catch |err| {
-        switch (err) {
+    const initial_range =
+        if (Range.initUsizeLen(0, file_buf.len)) |r| r else |err| switch (err) {
             error.RangeZeroLen => null,
             error.RangeTooLong => return error.OriginalFileTooLarge,
-        }
-    };
-    try piece_tbl.appendBounded(.{
-        .tag = .original,
-        .range = initial_range,
-    });
+        };
+
+    if (initial_range) |r| {
+        try piece_tbl.appendBounded(.{ .tag = .original, .range = r });
+    }
 
     return .{
         ._file_buf = file_buf,
@@ -273,11 +269,20 @@ pub fn insert(
         Limits.Size,
         add_buf.items.len,
     ) orelse unreachable; // TODO: proper error
-    try add_buf.appendSliceBounded(text);
 
+    // TODO: construct the range
     const new_piece =
-        Piece{ .tag = .add, .start = add_start, .len = insert_range.len };
+        Piece{
+            .tag = .add,
+            .range = Range.init(add_start, insert_range.len) catch |err| {
+                switch (err) {
+                    error.RangeZeroLen => unreachable,
+                    error.RangeTooLong => return error.InsertTextTooLarge,
+                }
+            },
+        };
 
+    try add_buf.appendSliceBounded(text);
     if (offset == 0) {
         // Insert before target; nothing removed.
         try replacements.appendBounded(new_piece);
@@ -286,7 +291,7 @@ pub fn insert(
             0,
             replacements.items,
         );
-    } else if (offset == target.len) {
+    } else if (offset == target.range.len) {
         // Insert after target; nothing removed.
         try replacements.appendBounded(new_piece);
         try self._piece_tbl.replaceRangeBounded(
@@ -297,11 +302,12 @@ pub fn insert(
     } else {
         // Interior: split into head, new, tail.
         var head = target;
-        head.len = offset;
+        head.range = head.range.set_len(offset) catch unreachable;
         try replacements.appendBounded(head);
         try replacements.appendBounded(new_piece);
 
-        const tail = target.shift_start(offset);
+        var tail = target;
+        tail.range = tail.range.shift_start(offset) catch unreachable;
         try replacements.appendBounded(tail);
 
         try self._piece_tbl.replaceRangeBounded(
@@ -325,7 +331,8 @@ const Iterator = struct {
             .original => self.file._file_buf,
             .add => self.file._add_buf.items,
         };
-        const span = buf[piece.start .. piece.start + piece.len];
+        const range = piece.range;
+        const span = buf[range.start..range.end()];
 
         self.piece_idx += 1;
         return span;
@@ -351,8 +358,10 @@ test "Crowley paper tests" {
         Piece,
         &[_]Piece{.{
             .tag = .original,
-            .start = 0,
-            .len = 20, // Paper says 19, but that looks to be an off by 1 error
+            .range = try Range.init(
+                0,
+                20, // Paper says 19, but that looks to be an off by 1 error
+            ),
         }},
         f._piece_tbl.items,
     );
@@ -366,8 +375,8 @@ test "Crowley paper tests" {
     try testing.expectEqualSlices(
         Piece,
         &[_]Piece{
-            .{ .tag = .original, .start = 0, .len = 2 },
-            .{ .tag = .original, .start = 8, .len = 12 },
+            .{ .tag = .original, .range = .{ .start = 0, .len = 2 } },
+            .{ .tag = .original, .range = .{ .start = 8, .len = 12 } },
         },
         f._piece_tbl.items,
     );
@@ -382,10 +391,10 @@ test "Crowley paper tests" {
     try testing.expectEqualSlices(
         Piece,
         &[_]Piece{
-            .{ .tag = .original, .start = 0, .len = 2 },
-            .{ .tag = .original, .start = 8, .len = 8 },
-            .{ .tag = .add, .start = 0, .len = 8 },
-            .{ .tag = .original, .start = 16, .len = 4 },
+            .{ .tag = .original, .range = .{ .start = 0, .len = 2 } },
+            .{ .tag = .original, .range = .{ .start = 8, .len = 8 } },
+            .{ .tag = .add, .range = .{ .start = 0, .len = 8 } },
+            .{ .tag = .original, .range = .{ .start = 16, .len = 4 } },
         },
         f._piece_tbl.items,
     );
