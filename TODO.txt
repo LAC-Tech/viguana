@@ -1,0 +1,3 @@
+- Finish insert/delete refactor
+- More abstract methods on File, ie
+    - delete until char, n times (ie dd would be delete until \n 1)
