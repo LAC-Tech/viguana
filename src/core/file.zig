@@ -193,9 +193,6 @@ pub fn delete(
     var last_piece_offset: Limits.Size = 0;
     var first_idx: usize = 0;
     var last_idx: usize = 0;
-    var buf: [2]PieceTbl.Piece = undefined;
-    var replacements = ArrayList(PieceTbl.Piece).initBuffer(&buf);
-
     {
         var cursor: Limits.Size = 0;
         var maybe_first_idx: ?usize = null;
@@ -221,6 +218,9 @@ pub fn delete(
 
     const first_piece = pieces._tbl.items[first_idx];
     const last_piece = pieces._tbl.items[last_idx];
+
+    var buf: [2]PieceTbl.Piece = undefined;
+    var replacements = ArrayList(PieceTbl.Piece).initBuffer(&buf);
 
     if (first_piece_offset > 0) {
         try replacements.appendBounded(first_piece.head(first_piece_offset));
@@ -324,13 +324,13 @@ pub fn insert(
             &[_]PieceTbl.Piece{new_piece},
         );
     } else {
-        const rs = [_]PieceTbl.Piece{
+        const replacements = [_]PieceTbl.Piece{
             target.head(offset),
             new_piece,
             target.tail(offset),
         };
 
-        try self._pieces._tbl.replaceRangeBounded(target_idx, 1, &rs);
+        try self._pieces._tbl.replaceRangeBounded(target_idx, 1, &replacements);
     }
 }
 
