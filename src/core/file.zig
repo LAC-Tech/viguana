@@ -87,6 +87,28 @@ const PieceTbl = struct {
         tag: enum(u1) { original, add },
         _reserved: u1 = 0,
         range: Range,
+
+        fn head(self: Piece, offset: Limits.Size) Piece {
+            return .{
+                .tag = self.tag,
+                .range = self.range.set_len(offset) catch unreachable,
+            };
+        }
+
+        fn tail(self: Piece, offset: Limits.Size) Piece {
+            return .{
+                .tag = self.tag,
+                .range = self.range.shift_start(offset) catch unreachable,
+            };
+        }
+
+        fn span(self: Piece, file_buf: []const u8, add_buf: []const u8) []const u8 {
+            const buf = switch (self.tag) {
+                .original => file_buf,
+                .add => add_buf,
+            };
+            return buf[self.range.start..self.range.end()];
+        }
     };
 
     _tbl: ArrayList(Piece),
@@ -201,15 +223,10 @@ pub fn delete(
     const last_piece = pieces._tbl.items[last_idx];
 
     if (first_piece_offset > 0) {
-        var p = first_piece;
-        p.range = p.range.set_len(first_piece_offset) catch unreachable;
-        try replacements.appendBounded(p);
+        try replacements.appendBounded(first_piece.head(first_piece_offset));
     }
     if (last_piece_offset < last_piece.range.len) {
-        var p = first_piece;
-        p.range =
-            last_piece.range.shift_start(last_piece_offset) catch unreachable;
-        try replacements.appendBounded(p);
+        try replacements.appendBounded(last_piece.tail(last_piece_offset));
     }
 
     try self._pieces._tbl.replaceRangeBounded(
@@ -238,9 +255,6 @@ pub fn insert(
     const pieces = self._pieces._tbl.items;
 
     var offset: Limits.Size = 0;
-    var buf: [3]PieceTbl.Piece = undefined;
-    var replacements = ArrayList(PieceTbl.Piece).initBuffer(&buf);
-
     var maybe_target_idx: ?usize = null;
     {
         var cursor: Limits.Size = 0;
@@ -297,36 +311,26 @@ pub fn insert(
     try self._add_buf.appendSliceBounded(text);
     if (offset == 0) {
         // Insert before target; nothing removed.
-        try replacements.appendBounded(new_piece);
         try self._pieces._tbl.replaceRangeBounded(
             target_idx,
             0,
-            replacements.items,
+            &[_]PieceTbl.Piece{new_piece},
         );
     } else if (offset == target.range.len) {
         // Insert after target; nothing removed.
-        try replacements.appendBounded(new_piece);
         try self._pieces._tbl.replaceRangeBounded(
             target_idx + 1,
             0,
-            replacements.items,
+            &[_]PieceTbl.Piece{new_piece},
         );
     } else {
-        // Interior: split into head, new, tail.
-        var head = target;
-        head.range = head.range.set_len(offset) catch unreachable;
-        try replacements.appendBounded(head);
-        try replacements.appendBounded(new_piece);
+        const rs = [_]PieceTbl.Piece{
+            target.head(offset),
+            new_piece,
+            target.tail(offset),
+        };
 
-        var tail = target;
-        tail.range = tail.range.shift_start(offset) catch unreachable;
-        try replacements.appendBounded(tail);
-
-        try self._pieces._tbl.replaceRangeBounded(
-            target_idx,
-            1,
-            replacements.items,
-        );
+        try self._pieces._tbl.replaceRangeBounded(target_idx, 1, &rs);
     }
 }
 
@@ -339,15 +343,8 @@ const Iterator = struct {
         const pieces = self.file._pieces._tbl.items;
         if (self.piece_idx >= pieces.len) return null;
         const piece = pieces[self.piece_idx];
-        const buf = switch (piece.tag) {
-            .original => self.file._file_buf,
-            .add => self.file._add_buf.items,
-        };
-        const range = piece.range;
-        const span = buf[range.start..range.end()];
-
         self.piece_idx += 1;
-        return span;
+        return piece.span(self.file._file_buf, self.file._add_buf.items);
     }
 };
 
