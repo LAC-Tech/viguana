@@ -126,13 +126,6 @@ const PieceTbl = struct {
         return .{ ._tbl = tbl };
     }
 
-    fn create_add(start: Limits.Size, len: Limits.Size) Err.ByteSpan!Piece {
-        return .{
-            .tag = .add,
-            .span = try ByteSpan.init(start, len),
-        };
-    }
-
     const FindRes = struct { idx: usize, offset: Limits.Size, piece: Piece };
 
     /// Positions must be ascending
