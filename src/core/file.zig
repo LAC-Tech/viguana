@@ -33,7 +33,6 @@ pub const Err = struct {
     const Insert = error{
         InsertZero,
         InsertOutOfBounds,
-        InsertTextTooLarge, // TODO: I think this is redundant
     };
 
     const Range = error{
@@ -189,11 +188,11 @@ const PieceTbl = struct {
         try self._tbl.insertBounded(idx, p);
     }
 
-    pub fn getMut(self: *@This(), idx: usize) *Piece {
+    fn getMut(self: *@This(), idx: usize) *Piece {
         return &self._tbl.items[idx];
     }
 
-    pub fn append(self: *@This(), piece: Piece) !void {
+    fn append(self: *@This(), piece: Piece) !void {
         try self._tbl.appendBounded(piece);
     }
 };
@@ -274,12 +273,7 @@ pub fn insert(
     pos: Limits.Size,
     text: []const u8,
 ) (Err.Insert || Err.Alloc)!void {
-    const text_len = math.cast(
-        Limits.Size,
-        text.len,
-    ) orelse return error.InsertTextTooLarge;
-
-    const insert_range = Range.init(pos, text_len) catch |err| switch (err) {
+    const insert_range = Range.initUsizeLen(pos, text.len) catch |err| switch (err) {
         error.RangeZeroLen => return error.InsertZero,
         error.RangeTooLong => return error.InsertOutOfBounds,
     };
@@ -306,7 +300,7 @@ pub fn insert(
             Limits.Size,
             piece.range.len,
             insert_range.len,
-        ) catch return error.InsertTextTooLarge;
+        ) catch return error.InsertOutOfBounds;
 
         try self._add_buf.appendSliceBounded(text);
         self._pieces.getMut(loc.idx).range =
@@ -325,7 +319,7 @@ pub fn insert(
     ) catch |err| {
         switch (err) {
             error.RangeZeroLen => unreachable,
-            error.RangeTooLong => return error.InsertTextTooLarge,
+            error.RangeTooLong => return error.InsertOutOfBounds,
         }
     };
 
