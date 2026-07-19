@@ -140,6 +140,54 @@ const PieceTbl = struct {
             .range = try Range.init(start, len),
         };
     }
+
+    pub const Location = struct { idx: usize, offset: Limits.Size, piece: Piece };
+
+    /// positions must be ascending. Resolves all of them in a single pass.
+    pub fn find(
+        self: *@This(),
+        comptime n: usize,
+        positions: [n]Limits.Size,
+    ) ?[n]Location {
+        var result: [n]Location = undefined;
+        var next: usize = 0;
+        var cursor: Limits.Size = 0;
+
+        for (self._tbl.items, 0..) |p, i| {
+            while (next < n and cursor + p.range.len > positions[next]) {
+                result[next] = .{
+                    .idx = i,
+                    .offset = positions[next] - cursor,
+                    .piece = p,
+                };
+                next += 1;
+            }
+            if (next == n) return result;
+            cursor += p.range.len;
+        }
+        return null;
+    }
+
+    pub fn replaceRange(
+        self: *@This(),
+        first_idx: usize,
+        last_idx: usize,
+        replacements: []const Piece,
+    ) !void {
+        try self._tbl.replaceRangeBounded(
+            first_idx,
+            last_idx - first_idx + 1,
+            replacements,
+        );
+    }
+
+    pub fn ins(self: *@This(), idx: usize, piece: Piece) !void {
+        try self._tbl.replaceRangeBounded(idx, 0, &[_]Piece{piece});
+    }
+
+    pub fn append(self: *@This(), piece: Piece) !void {
+        try self._tbl.appendBounded(piece);
+    }
 };
 
 const Self = @This();
@@ -187,51 +235,29 @@ pub fn delete(
         error.RangeZeroLen => return error.DeleteZero,
         error.RangeTooLong => return error.DeleteOutOfBounds,
     };
-    const pieces = self._pieces;
+    const locs = self._pieces.find(
+        2,
+        .{ delete_range.start, delete_range.end() - 1 },
+    ) orelse
+        return error.DeleteOutOfBounds;
 
-    var first_piece_offset: Limits.Size = 0;
-    var last_piece_offset: Limits.Size = 0;
-    var first_idx: usize = 0;
-    var last_idx: usize = 0;
-    {
-        var cursor: Limits.Size = 0;
-        var maybe_first_idx: ?usize = null;
-        var maybe_last_idx: ?usize = null;
-
-        for (pieces._tbl.items, 0..) |p, i| {
-            const r = Range.init(cursor, p.range.len) catch unreachable;
-            if (r.end() > delete_range.start) {
-                maybe_first_idx = i;
-                first_piece_offset = delete_range.start - r.start;
-            }
-            if (delete_range.end() > r.start) {
-                maybe_last_idx = i;
-                last_piece_offset = delete_range.end() - r.start;
-                break;
-            }
-            cursor += p.range.len;
-        }
-
-        first_idx = maybe_first_idx orelse return error.DeleteOutOfBounds;
-        last_idx = maybe_last_idx orelse return error.DeleteOutOfBounds;
-    }
-
-    const first_piece = pieces._tbl.items[first_idx];
-    const last_piece = pieces._tbl.items[last_idx];
+    const first = locs[0];
+    const last = locs[1];
 
     var buf: [2]PieceTbl.Piece = undefined;
     var replacements = ArrayList(PieceTbl.Piece).initBuffer(&buf);
 
-    if (first_piece_offset > 0) {
-        try replacements.appendBounded(first_piece.head(first_piece_offset));
+    if (first.offset > 0) {
+        try replacements.appendBounded(first.piece.head(first.offset));
     }
-    if (last_piece_offset < last_piece.range.len) {
-        try replacements.appendBounded(last_piece.tail(last_piece_offset));
+    const last_tail_offset = last.offset + 1;
+    if (last_tail_offset < last.piece.range.len) {
+        try replacements.appendBounded(last.piece.tail(last_tail_offset));
     }
 
-    try self._pieces._tbl.replaceRangeBounded(
-        first_idx,
-        last_idx - first_idx + 1,
+    try self._pieces.replaceRange(
+        first.idx,
+        last.idx,
         replacements.items,
     );
 }
@@ -252,47 +278,33 @@ pub fn insert(
         error.RangeTooLong => return error.InsertOutOfBounds,
     };
 
-    const pieces = self._pieces._tbl.items;
-
-    var offset: Limits.Size = 0;
-    var maybe_target_idx: ?usize = null;
-    {
-        var cursor: Limits.Size = 0;
-
-        for (pieces, 0..) |p, i| {
-            const r = Range.init(cursor, p.range.len) catch unreachable;
-            if (r.end() > insert_range.start) {
-                maybe_target_idx = i;
-                offset = insert_range.start - r.start;
-                break;
-            }
-            cursor += p.range.len;
-        }
+    const target = self._pieces.find(1, .{insert_range.start});
+    if (target == null) {
+        debug.assert(self._pieces._tbl.items.len == 0);
+        try self._add_buf.appendSliceBounded(text);
+        try self._pieces.append(.{ .tag = .add, .range = insert_range });
+        return;
     }
 
-    const target_idx = if (maybe_target_idx) |i| i else {
-        // Assuming if we don't find the target idx, the piece table is empty
-        debug.assert(pieces.len == 0);
-        try self._add_buf.appendSliceBounded(text);
-        try self._pieces._tbl.appendBounded(.{ .tag = .add, .range = insert_range });
-        return;
-    };
-
-    const target = pieces[target_idx];
+    const loc = target.?[0];
+    const piece = loc.piece;
+    const offset = loc.offset;
+    const target_idx = loc.idx;
 
     // If cursor is after most recently inserted, we can mutate piece in place
-    if (offset == target.range.len and
-        target.tag == .add and
-        target.range.end() == self._add_buf.items.len)
+    if (offset == piece.range.len and
+        piece.tag == .add and
+        piece.range.end() == self._add_buf.items.len)
     {
         const new_len = math.add(
             Limits.Size,
-            target.range.len,
+            piece.range.len,
             insert_range.len,
         ) catch return error.InsertTextTooLarge;
 
         try self._add_buf.appendSliceBounded(text);
-        pieces[target_idx].range = target.range.set_len(new_len) catch unreachable;
+        self._pieces._tbl.items[loc.idx].range =
+            piece.range.set_len(new_len) catch unreachable;
         return;
     }
 
@@ -311,26 +323,18 @@ pub fn insert(
     try self._add_buf.appendSliceBounded(text);
     if (offset == 0) {
         // Insert before target; nothing removed.
-        try self._pieces._tbl.replaceRangeBounded(
-            target_idx,
-            0,
-            &[_]PieceTbl.Piece{new_piece},
-        );
-    } else if (offset == target.range.len) {
+        try self._pieces.ins(target_idx, new_piece);
+    } else if (offset == piece.range.len) {
         // Insert after target; nothing removed.
-        try self._pieces._tbl.replaceRangeBounded(
-            target_idx + 1,
-            0,
-            &[_]PieceTbl.Piece{new_piece},
-        );
+        try self._pieces.ins(target_idx + 1, new_piece);
     } else {
         const replacements = [_]PieceTbl.Piece{
-            target.head(offset),
+            piece.head(offset),
             new_piece,
-            target.tail(offset),
+            piece.tail(offset),
         };
 
-        try self._pieces._tbl.replaceRangeBounded(target_idx, 1, &replacements);
+        try self._pieces.replaceRange(target_idx, target_idx, &replacements);
     }
 }
 
@@ -433,6 +437,18 @@ test "empty deletes are invalid" {
     var f = try Self.init(a, Limits{}, "hi");
 
     try testing.expectError(error.DeleteZero, f.delete(0, 0));
+}
+
+test "can delete right up until the end of the file" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+    var seq = std.Io.Writer.Allocating.init(a);
+
+    var f = try Self.init(a, Limits{}, "neovim");
+    try f.delete(3, 3);
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("neo", seq.written());
 }
 
 test "inserting nothing is invalid" {
