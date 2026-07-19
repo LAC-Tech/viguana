@@ -35,46 +35,50 @@ pub const Err = struct {
         InsertOutOfBounds,
     };
 
-    const Range = error{
-        RangeZeroLen,
-        RangeTooLong,
+    const ByteSpan = error{
+        ByteSpanZero,
+        ByteSpanTooLong,
     };
 
     const Alloc = mem.Allocator.Error;
 };
 
-/// A range for an operation on a file
-const Range = packed struct(u62) {
-    /// conceptually I believe this is the cursor position
+const ByteSpan = packed struct(u62) {
     start: Limits.Size,
-    /// number of bytes.
-    /// do not set it directly, use `setLen` to catch range errors early
     len: Limits.Size,
 
-    fn init(start: Limits.Size, len: Limits.Size) Err.Range!@This() {
-        if (len == 0) return error.RangeZeroLen;
+    fn init(start: Limits.Size, len: Limits.Size) Err.ByteSpan!ByteSpan {
+        if (len == 0) return error.ByteSpanZero;
         _ = math.add(
             Limits.Size,
             start,
             len,
-        ) catch return error.RangeTooLong;
+        ) catch return error.ByteSpanTooLong;
         return .{ .start = start, .len = len };
     }
 
-    fn initUsizeLen(start: Limits.Size, len: usize) Err.Range!@This() {
+    fn initUsizeLen(start: Limits.Size, len: usize) Err.ByteSpan!ByteSpan {
         const cast_len =
-            math.cast(Limits.Size, len) orelse return error.RangeTooLong;
+            math.cast(Limits.Size, len) orelse return error.ByteSpanTooLong;
 
         return @This().init(start, cast_len);
     }
 
     /// Safe to compute if Range created through init
-    fn end(self: @This()) Limits.Size {
+    inline fn end(self: @This()) Limits.Size {
         return self.start + self.len;
     }
 
-    fn set_len(self: @This(), new_len: Limits.Size) Err.Range!@This() {
+    fn change_len(self: @This(), new_len: Limits.Size) Err.ByteSpan!ByteSpan {
         return @This().init(self.start, new_len);
+    }
+
+    fn adjust_start(self: @This(), offset: Limits.Size) Err.ByteSpan!ByteSpan {
+        return @This().init(self.start + offset, self.len - offset);
+    }
+
+    fn slice(self: @This(), bytes: []const u8) []const u8 {
+        return bytes[self.start..self.end()];
     }
 };
 
@@ -84,33 +88,20 @@ const PieceTbl = struct {
     const Piece = packed struct(u64) {
         tag: enum(u1) { original, add },
         _reserved: u1 = 0,
-        range: Range,
+        byte_span: ByteSpan,
 
-        fn head(self: Piece, offset: Limits.Size) Err.Range!Piece {
+        fn head(self: Piece, offset: Limits.Size) Err.ByteSpan!Piece {
             return .{
                 .tag = self.tag,
-                .range = try self.range.set_len(offset),
+                .byte_span = try self.byte_span.change_len(offset),
             };
         }
 
-        fn tail(self: Piece, offset: Limits.Size) Err.Range!Piece {
-            const r = self.range;
+        fn tail(self: Piece, offset: Limits.Size) Err.ByteSpan!Piece {
             return .{
                 .tag = self.tag,
-                .range = try Range.init(r.start + offset, r.len - offset),
+                .byte_span = try self.byte_span.adjust_start(offset),
             };
-        }
-
-        fn span(
-            self: Piece,
-            file_buf: []const u8,
-            add_buf: []const u8,
-        ) []const u8 {
-            const buf = switch (self.tag) {
-                .original => file_buf,
-                .add => add_buf,
-            };
-            return buf[self.range.start..self.range.end()];
         }
     };
 
@@ -124,23 +115,25 @@ const PieceTbl = struct {
             // + 1 because piece tables start with one entry already
             limits.edits_until_swap_write + 1,
         );
-        const initial_range =
-            if (Range.initUsizeLen(0, file_buf_len)) |r| r else |err| switch (err) {
-                error.RangeZeroLen => null,
-                error.RangeTooLong => return error.OriginalFileTooLarge,
-            };
+        const initial_span = if (ByteSpan.initUsizeLen(
+            0,
+            file_buf_len,
+        )) |r| r else |err| switch (err) {
+            error.ByteSpanZero => null,
+            error.ByteSpanTooLong => return error.OriginalFileTooLarge,
+        };
 
-        if (initial_range) |r| {
-            try tbl.appendBounded(.{ .tag = .original, .range = r });
+        if (initial_span) |bs| {
+            try tbl.appendBounded(.{ .tag = .original, .byte_span = bs });
         }
 
         return .{ ._tbl = tbl };
     }
 
-    fn create_add(start: Limits.Size, len: Limits.Size) Err.Range!Piece {
+    fn create_add(start: Limits.Size, len: Limits.Size) Err.ByteSpan!Piece {
         return .{
             .tag = .add,
-            .range = try Range.init(start, len),
+            .byte_span = try ByteSpan.init(start, len),
         };
     }
 
@@ -157,7 +150,7 @@ const PieceTbl = struct {
         var cursor: Limits.Size = 0;
 
         for (self._tbl.items, 0..) |p, i| {
-            while (next < n and cursor + p.range.len > positions[next]) {
+            while (next < n and cursor + p.byte_span.len > positions[next]) {
                 result[next] = .{
                     .idx = i,
                     .offset = positions[next] - cursor,
@@ -166,7 +159,7 @@ const PieceTbl = struct {
                 next += 1;
             }
             if (next == n) return result;
-            cursor += p.range.len;
+            cursor += p.byte_span.len;
         }
         return null;
     }
@@ -184,16 +177,16 @@ const PieceTbl = struct {
         );
     }
 
-    fn insert(self: *@This(), idx: usize, p: Piece) !void {
-        try self._tbl.insertBounded(idx, p);
-    }
-
-    fn getMut(self: *@This(), idx: usize) *Piece {
-        return &self._tbl.items[idx];
+    fn insertAdd(self: *@This(), idx: usize, bs: ByteSpan) !void {
+        try self._tbl.insertBounded(idx, .{ .tag = .add, .byte_span = bs });
     }
 
     fn append(self: *@This(), piece: Piece) !void {
         try self._tbl.appendBounded(piece);
+    }
+
+    fn getRef(self: @This(), idx: usize) ?*Piece {
+        return if (idx >= self._tbl.items.len) null else &self._tbl.items[idx];
     }
 };
 
@@ -225,6 +218,16 @@ pub fn init(
     };
 }
 
+fn buf_at(self: @This(), idx: usize) ?[]const u8 {
+    const p = self._pieces.getRef(idx) orelse return null;
+    const buf = switch (p.tag) {
+        .original => self._file_buf,
+        .add => self._add_buf.items,
+    };
+
+    return p.byte_span.slice(buf);
+}
+
 // Derived/logical text
 fn writeSequence(self: *const Self, w: *Io.Writer) Io.Writer.Error!void {
     var it = Iterator{ .file = self, .piece_idx = 0 };
@@ -238,13 +241,13 @@ pub fn delete(
     start: Limits.Size,
     len: Limits.Size,
 ) (Err.Delete || Err.Alloc)!void {
-    const delete_range = Range.init(start, len) catch |err| switch (err) {
-        error.RangeZeroLen => return error.DeleteZero,
-        error.RangeTooLong => return error.DeleteOutOfBounds,
+    const delete_span = ByteSpan.init(start, len) catch |err| switch (err) {
+        error.ByteSpanZero => return error.DeleteZero,
+        error.ByteSpanTooLong => return error.DeleteOutOfBounds,
     };
     const frs = self._pieces.find(
         2,
-        .{ delete_range.start, delete_range.end() - 1 },
+        .{ delete_span.start, delete_span.end() - 1 },
     ) orelse
         return error.DeleteOutOfBounds;
 
@@ -259,7 +262,7 @@ pub fn delete(
         replacements[n] = first.piece.head(first.offset) catch unreachable;
         n += 1;
     }
-    if (last_tail_offset < last.piece.range.len) {
+    if (last_tail_offset < last.piece.byte_span.len) {
         replacements[n] = last.piece.tail(last_tail_offset) catch unreachable;
         n += 1;
     }
@@ -272,27 +275,27 @@ pub fn insert(
     pos: Limits.Size,
     text: []const u8,
 ) (Err.Insert || Err.Alloc)!void {
-    const insert_range = Range.initUsizeLen(pos, text.len) catch |err| switch (err) {
-        error.RangeZeroLen => return error.InsertZero,
-        error.RangeTooLong => return error.InsertOutOfBounds,
+    const insert_span = ByteSpan.initUsizeLen(pos, text.len) catch |err| switch (err) {
+        error.ByteSpanZero => return error.InsertZero,
+        error.ByteSpanTooLong => return error.InsertOutOfBounds,
     };
 
-    const loc = if (self._pieces.find(1, .{insert_range.start})) |t| t[0] else {
+    const loc = if (self._pieces.find(1, .{insert_span.start})) |t| t[0] else {
         const add_start = math.cast(
             Limits.Size,
             self._add_buf.items.len,
         ) orelse unreachable;
 
-        const new_piece = PieceTbl.create_add(
+        const new_span = ByteSpan.init(
             add_start,
-            insert_range.len,
+            insert_span.len,
         ) catch |err| switch (err) {
-            error.RangeZeroLen => unreachable,
-            error.RangeTooLong => return error.InsertOutOfBounds,
+            error.ByteSpanZero => unreachable,
+            error.ByteSpanTooLong => return error.InsertOutOfBounds,
         };
 
         try self._add_buf.appendSliceBounded(text);
-        try self._pieces.append(new_piece);
+        try self._pieces.append(.{ .tag = .add, .byte_span = new_span });
         return;
     };
 
@@ -301,19 +304,20 @@ pub fn insert(
     const target_idx = loc.idx;
 
     // If cursor is after most recently inserted, we can mutate piece in place
-    if (offset == piece.range.len and
+    if (offset == piece.byte_span.len and
         piece.tag == .add and
-        piece.range.end() == self._add_buf.items.len)
+        piece.byte_span.end() == self._add_buf.items.len)
     {
         const new_len = math.add(
             Limits.Size,
-            piece.range.len,
-            insert_range.len,
+            piece.byte_span.len,
+            insert_span.len,
         ) catch return error.InsertOutOfBounds;
 
         try self._add_buf.appendSliceBounded(text);
-        self._pieces.getMut(loc.idx).range =
-            piece.range.set_len(new_len) catch unreachable;
+        var p = self._pieces.getRef(loc.idx) orelse unreachable;
+        p.byte_span =
+            piece.byte_span.change_len(new_len) catch unreachable;
         return;
     }
 
@@ -322,27 +326,27 @@ pub fn insert(
         self._add_buf.items.len,
     ) orelse unreachable; // TODO: proper error
 
-    const new_piece = PieceTbl.create_add(
+    const new_span = ByteSpan.init(
         add_start,
-        insert_range.len,
+        insert_span.len,
     ) catch |err| {
         switch (err) {
-            error.RangeZeroLen => unreachable,
-            error.RangeTooLong => return error.InsertOutOfBounds,
+            error.ByteSpanZero => unreachable,
+            error.ByteSpanTooLong => return error.InsertOutOfBounds,
         }
     };
 
     try self._add_buf.appendSliceBounded(text);
     if (offset == 0) {
         // Insert before target; nothing removed.
-        try self._pieces.insert(target_idx, new_piece);
-    } else if (offset == piece.range.len) {
+        try self._pieces.insertAdd(target_idx, new_span);
+    } else if (offset == piece.byte_span.len) {
         // Insert after target; nothing removed.
-        try self._pieces.insert(target_idx + 1, new_piece);
+        try self._pieces.insertAdd(target_idx + 1, new_span);
     } else {
         const replacements = [_]PieceTbl.Piece{
             piece.head(offset) catch unreachable,
-            new_piece,
+            .{ .tag = .add, .byte_span = new_span },
             piece.tail(offset) catch unreachable,
         };
 
@@ -356,11 +360,9 @@ const Iterator = struct {
 
     /// Returns next contiguous span of bytes
     fn next(self: *Iterator) ?[]const u8 {
-        const pieces = self.file._pieces._tbl.items;
-        if (self.piece_idx >= pieces.len) return null;
-        const piece = pieces[self.piece_idx];
+        const buf = self.file.buf_at(self.piece_idx) orelse return null;
         self.piece_idx += 1;
-        return piece.span(self.file._file_buf, self.file._add_buf.items);
+        return buf;
     }
 };
 
@@ -383,7 +385,7 @@ test "Crowley paper tests" {
         PieceTbl.Piece,
         &[_]PieceTbl.Piece{.{
             .tag = .original,
-            .range = try Range.init(
+            .byte_span = try ByteSpan.init(
                 0,
                 20, // Paper says 19, but that looks to be an off by 1 error
             ),
@@ -400,8 +402,8 @@ test "Crowley paper tests" {
     try testing.expectEqualSlices(
         PieceTbl.Piece,
         &[_]PieceTbl.Piece{
-            .{ .tag = .original, .range = .{ .start = 0, .len = 2 } },
-            .{ .tag = .original, .range = .{ .start = 8, .len = 12 } },
+            .{ .tag = .original, .byte_span = .{ .start = 0, .len = 2 } },
+            .{ .tag = .original, .byte_span = .{ .start = 8, .len = 12 } },
         },
         f._pieces._tbl.items,
     );
@@ -416,10 +418,10 @@ test "Crowley paper tests" {
     try testing.expectEqualSlices(
         PieceTbl.Piece,
         &[_]PieceTbl.Piece{
-            .{ .tag = .original, .range = .{ .start = 0, .len = 2 } },
-            .{ .tag = .original, .range = .{ .start = 8, .len = 8 } },
-            .{ .tag = .add, .range = .{ .start = 0, .len = 8 } },
-            .{ .tag = .original, .range = .{ .start = 16, .len = 4 } },
+            .{ .tag = .original, .byte_span = .{ .start = 0, .len = 2 } },
+            .{ .tag = .original, .byte_span = .{ .start = 8, .len = 8 } },
+            .{ .tag = .add, .byte_span = .{ .start = 0, .len = 8 } },
+            .{ .tag = .original, .byte_span = .{ .start = 16, .len = 4 } },
         },
         f._pieces._tbl.items,
     );
