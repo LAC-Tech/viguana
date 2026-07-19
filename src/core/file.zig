@@ -79,6 +79,8 @@ const Range = packed struct(u62) {
     }
 };
 
+// Some of these methods are quite thin; but we may store the pieces as a gap
+// buffer later.
 const PieceTbl = struct {
     const Piece = packed struct(u64) {
         tag: enum(u1) { original, add },
@@ -179,9 +181,12 @@ const PieceTbl = struct {
         );
     }
 
-    // TODO awful name and awful implementation
-    pub fn ins(self: *@This(), idx: usize, piece: Piece) !void {
-        try self._tbl.replaceRangeBounded(idx, 0, &[_]Piece{piece});
+    pub fn insert(self: *@This(), idx: usize, p: Piece) !void {
+        try self._tbl.insertBounded(idx, p);
+    }
+
+    pub fn getMut(self: *@This(), idx: usize) *Piece {
+        return &self._tbl.items[idx];
     }
 
     pub fn append(self: *@This(), piece: Piece) !void {
@@ -300,7 +305,7 @@ pub fn insert(
         ) catch return error.InsertTextTooLarge;
 
         try self._add_buf.appendSliceBounded(text);
-        self._pieces._tbl.items[loc.idx].range =
+        self._pieces.getMut(loc.idx).range =
             piece.range.set_len(new_len) catch unreachable;
         return;
     }
@@ -320,10 +325,10 @@ pub fn insert(
     try self._add_buf.appendSliceBounded(text);
     if (offset == 0) {
         // Insert before target; nothing removed.
-        try self._pieces.ins(target_idx, new_piece);
+        try self._pieces.insert(target_idx, new_piece);
     } else if (offset == piece.range.len) {
         // Insert after target; nothing removed.
-        try self._pieces.ins(target_idx + 1, new_piece);
+        try self._pieces.insert(target_idx + 1, new_piece);
     } else {
         const replacements = [_]PieceTbl.Piece{
             piece.head(offset) catch unreachable,
