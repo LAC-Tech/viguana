@@ -35,23 +35,24 @@ pub const Err = struct {
         InsertOutOfBounds,
         InsertTextTooLarge, // TODO: I think this is redundant
     };
+
+    const Range = error{
+        RangeZeroLen,
+        RangeTooLong,
+    };
+
     const Alloc = mem.Allocator.Error;
 };
 
 /// A range for an operation on a file
 const Range = packed struct(u62) {
-    const InitErr = error{
-        RangeZeroLen,
-        RangeTooLong,
-    };
-
     /// conceptually I believe this is the cursor position
     start: Limits.Size,
     /// number of bytes.
     /// do not set it directly, use `setLen` to catch range errors early
     len: Limits.Size,
 
-    fn init(start: Limits.Size, len: Limits.Size) InitErr!@This() {
+    fn init(start: Limits.Size, len: Limits.Size) Err.Range!@This() {
         if (len == 0) return error.RangeZeroLen;
         _ = math.add(
             Limits.Size,
@@ -61,7 +62,7 @@ const Range = packed struct(u62) {
         return .{ .start = start, .len = len };
     }
 
-    fn initUsizeLen(start: Limits.Size, len: usize) InitErr!@This() {
+    fn initUsizeLen(start: Limits.Size, len: usize) Err.Range!@This() {
         const cast_len =
             math.cast(Limits.Size, len) orelse return error.RangeTooLong;
 
@@ -73,11 +74,7 @@ const Range = packed struct(u62) {
         return self.start + self.len;
     }
 
-    fn shift_start(self: @This(), offset: Limits.Size) InitErr!@This() {
-        return @This().init(self.start + offset, self.len - offset);
-    }
-
-    fn set_len(self: @This(), new_len: Limits.Size) InitErr!@This() {
+    fn set_len(self: @This(), new_len: Limits.Size) Err.Range!@This() {
         return @This().init(self.start, new_len);
     }
 };
@@ -88,17 +85,18 @@ const PieceTbl = struct {
         _reserved: u1 = 0,
         range: Range,
 
-        fn head(self: Piece, offset: Limits.Size) Piece {
+        fn head(self: Piece, offset: Limits.Size) Err.Range!Piece {
             return .{
                 .tag = self.tag,
-                .range = self.range.set_len(offset) catch unreachable,
+                .range = try self.range.set_len(offset),
             };
         }
 
-        fn tail(self: Piece, offset: Limits.Size) Piece {
+        fn tail(self: Piece, offset: Limits.Size) Err.Range!Piece {
+            const r = self.range;
             return .{
                 .tag = self.tag,
-                .range = self.range.shift_start(offset) catch unreachable,
+                .range = try Range.init(r.start + offset, r.len - offset),
             };
         }
 
@@ -134,7 +132,7 @@ const PieceTbl = struct {
         return .{ ._tbl = tbl };
     }
 
-    fn create_add(start: Limits.Size, len: Limits.Size) Range.InitErr!Piece {
+    fn create_add(start: Limits.Size, len: Limits.Size) Err.Range!Piece {
         return .{
             .tag = .add,
             .range = try Range.init(start, len),
@@ -143,7 +141,7 @@ const PieceTbl = struct {
 
     pub const Location = struct { idx: usize, offset: Limits.Size, piece: Piece };
 
-    /// positions must be ascending. Resolves all of them in a single pass.
+    /// Positions must be ascending
     pub fn find(
         self: *@This(),
         comptime n: usize,
@@ -181,6 +179,7 @@ const PieceTbl = struct {
         );
     }
 
+    // TODO awful name and awful implementation
     pub fn ins(self: *@This(), idx: usize, piece: Piece) !void {
         try self._tbl.replaceRangeBounded(idx, 0, &[_]Piece{piece});
     }
@@ -243,23 +242,21 @@ pub fn delete(
 
     const first = locs[0];
     const last = locs[1];
+    const last_tail_offset = last.offset + 1;
 
-    var buf: [2]PieceTbl.Piece = undefined;
-    var replacements = ArrayList(PieceTbl.Piece).initBuffer(&buf);
+    var replacements: [2]PieceTbl.Piece = undefined;
+    var n: usize = 0;
 
     if (first.offset > 0) {
-        try replacements.appendBounded(first.piece.head(first.offset));
+        replacements[n] = first.piece.head(first.offset) catch unreachable;
+        n += 1;
     }
-    const last_tail_offset = last.offset + 1;
     if (last_tail_offset < last.piece.range.len) {
-        try replacements.appendBounded(last.piece.tail(last_tail_offset));
+        replacements[n] = last.piece.tail(last_tail_offset) catch unreachable;
+        n += 1;
     }
 
-    try self._pieces.replaceRange(
-        first.idx,
-        last.idx,
-        replacements.items,
-    );
+    try self._pieces.replaceRange(first.idx, last.idx, replacements[0..n]);
 }
 
 // TODO: still mostly clankery, I won't understand this later
@@ -329,9 +326,9 @@ pub fn insert(
         try self._pieces.ins(target_idx + 1, new_piece);
     } else {
         const replacements = [_]PieceTbl.Piece{
-            piece.head(offset),
+            piece.head(offset) catch unreachable,
             new_piece,
-            piece.tail(offset),
+            piece.tail(offset) catch unreachable,
         };
 
         try self._pieces.replaceRange(target_idx, target_idx, &replacements);
