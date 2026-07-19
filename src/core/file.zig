@@ -102,7 +102,11 @@ const PieceTbl = struct {
             };
         }
 
-        fn span(self: Piece, file_buf: []const u8, add_buf: []const u8) []const u8 {
+        fn span(
+            self: Piece,
+            file_buf: []const u8,
+            add_buf: []const u8,
+        ) []const u8 {
             const buf = switch (self.tag) {
                 .original => file_buf,
                 .add => add_buf,
@@ -315,7 +319,10 @@ pub fn insert(
         self._add_buf.items.len,
     ) orelse unreachable; // TODO: proper error
 
-    const new_piece = PieceTbl.create_add(add_start, insert_range.len) catch |err| {
+    const new_piece = PieceTbl.create_add(
+        add_start,
+        insert_range.len,
+    ) catch |err| {
         switch (err) {
             error.RangeZeroLen => unreachable,
             error.RangeTooLong => return error.InsertTextTooLarge,
@@ -340,6 +347,8 @@ pub fn insert(
     }
 }
 
+// TODO: this is an iterator for the piecetable - it belongs there.
+// And we can get rid of `span! too
 const Iterator = struct {
     file: *const Self,
     piece_idx: usize,
