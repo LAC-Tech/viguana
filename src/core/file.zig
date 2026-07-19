@@ -86,20 +86,6 @@ const PieceTbl = struct {
         tag: enum(u1) { original, add },
         _reserved: u1 = 0,
         span: ByteSpan,
-
-        fn head(self: Piece, offset: Limits.Size) Err.ByteSpan!Piece {
-            return .{
-                .tag = self.tag,
-                .span = try self.span.resize(offset),
-            };
-        }
-
-        fn tail(self: Piece, offset: Limits.Size) Err.ByteSpan!Piece {
-            return .{
-                .tag = self.tag,
-                .span = try self.span.advance(offset),
-            };
-        }
     };
 
     _tbl: ArrayList(Piece),
@@ -252,11 +238,15 @@ pub fn delete(
     var n: usize = 0;
 
     if (first.offset > 0) {
-        replacements[n] = first.piece.head(first.offset) catch unreachable;
+        var p = first.piece;
+        p.span = try p.span.resize(first.offset);
+        replacements[n] = p;
         n += 1;
     }
     if (last_tail_offset < last.piece.span.len) {
-        replacements[n] = last.piece.tail(last_tail_offset) catch unreachable;
+        var p = last.piece;
+        p.span = try p.span.advance(last_tail_offset);
+        replacements[n] = p;
         n += 1;
     }
 
@@ -318,11 +308,12 @@ pub fn insert(
         // Insert after target; nothing removed.
         try self._pieces.insert(target_idx + 1, .{ .tag = .add, .span = new_span });
     } else {
-        const replacements = [_]PieceTbl.Piece{
-            piece.head(offset) catch unreachable,
-            .{ .tag = .add, .span = new_span },
-            piece.tail(offset) catch unreachable,
-        };
+        var head = piece;
+        head.span = try head.span.resize(offset);
+        var tail = piece;
+        tail.span = try tail.span.advance(offset);
+        const replacements =
+            [_]PieceTbl.Piece{ head, .{ .tag = .add, .span = new_span }, tail };
 
         try self._pieces.replaceRange(target_idx, target_idx, &replacements);
     }
