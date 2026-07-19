@@ -278,15 +278,12 @@ pub fn insert(
         error.RangeTooLong => return error.InsertOutOfBounds,
     };
 
-    const target = self._pieces.find(1, .{insert_range.start});
-    if (target == null) {
-        debug.assert(self._pieces._tbl.items.len == 0);
+    const loc = if (self._pieces.find(1, .{insert_range.start})) |t| t[0] else {
         try self._add_buf.appendSliceBounded(text);
         try self._pieces.append(.{ .tag = .add, .range = insert_range });
         return;
-    }
+    };
 
-    const loc = target.?[0];
     const piece = loc.piece;
     const offset = loc.offset;
     const target_idx = loc.idx;
@@ -495,4 +492,16 @@ test "gracefully errors if file is too large" {
         error.OriginalFileTooLarge,
         Self.init(a, Limits{}, original_file),
     );
+}
+
+test "inserts at end of non-empty file" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+    var seq = std.Io.Writer.Allocating.init(a);
+
+    var f = try Self.init(a, Limits{}, "hello");
+    try f.insert(5, " world");
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("hello world", seq.written());
 }
