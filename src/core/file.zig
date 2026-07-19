@@ -75,9 +75,7 @@ const ByteSpan = packed struct(u62) {
     }
 
     fn moveTo(self: ByteSpan, new_start: Limits.Size) Err.ByteSpan!ByteSpan {
-        const cast_start =
-            math.cast(Limits.Size, new_start) orelse return error.ByteSpanTooLong;
-        return ByteSpan.init(cast_start, self.len);
+        return ByteSpan.init(new_start, self.len);
     }
 };
 
