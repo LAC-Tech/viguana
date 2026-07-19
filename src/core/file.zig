@@ -144,15 +144,15 @@ const PieceTbl = struct {
         };
     }
 
-    const Location = struct { idx: usize, offset: Limits.Size, piece: Piece };
+    const FindRes = struct { idx: usize, offset: Limits.Size, piece: Piece };
 
     /// Positions must be ascending
     fn find(
         self: *@This(),
         comptime n: usize,
         positions: [n]Limits.Size,
-    ) ?[n]Location {
-        var result: [n]Location = undefined;
+    ) ?[n]FindRes {
+        var result: [n]FindRes = undefined;
         var next: usize = 0;
         var cursor: Limits.Size = 0;
 
@@ -242,14 +242,14 @@ pub fn delete(
         error.RangeZeroLen => return error.DeleteZero,
         error.RangeTooLong => return error.DeleteOutOfBounds,
     };
-    const locs = self._pieces.find(
+    const frs = self._pieces.find(
         2,
         .{ delete_range.start, delete_range.end() - 1 },
     ) orelse
         return error.DeleteOutOfBounds;
 
-    const first = locs[0];
-    const last = locs[1];
+    const first = frs[0];
+    const last = frs[1];
     const last_tail_offset = last.offset + 1;
 
     var replacements: [2]PieceTbl.Piece = undefined;
@@ -267,7 +267,6 @@ pub fn delete(
     try self._pieces.replaceRange(first.idx, last.idx, replacements[0..n]);
 }
 
-// TODO: still mostly clankery, I won't understand this later
 pub fn insert(
     self: *Self,
     pos: Limits.Size,
@@ -279,8 +278,21 @@ pub fn insert(
     };
 
     const loc = if (self._pieces.find(1, .{insert_range.start})) |t| t[0] else {
+        const add_start = math.cast(
+            Limits.Size,
+            self._add_buf.items.len,
+        ) orelse unreachable;
+
+        const new_piece = PieceTbl.create_add(
+            add_start,
+            insert_range.len,
+        ) catch |err| switch (err) {
+            error.RangeZeroLen => unreachable,
+            error.RangeTooLong => return error.InsertOutOfBounds,
+        };
+
         try self._add_buf.appendSliceBounded(text);
-        try self._pieces.append(.{ .tag = .add, .range = insert_range });
+        try self._pieces.append(new_piece);
         return;
     };
 
