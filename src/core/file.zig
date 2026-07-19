@@ -86,7 +86,12 @@ const Piece = packed struct(u64) {
 };
 
 // TODO better name - not only the struct but the fields within
-const FindRes = struct { idx: usize, offset: Limits.Size, piece: Piece };
+const FindRes = struct {
+    // idx of the piece the position is found in
+    idx: usize,
+    // byte offset inside said piece it's found in
+    offset: Limits.Size,
+};
 
 /// Positions must be ascending
 // TODO better name
@@ -104,7 +109,6 @@ fn find(
             result[next] = .{
                 .idx = i,
                 .offset = positions[next] - cursor,
-                .piece = p,
             };
             next += 1;
         }
@@ -191,9 +195,11 @@ pub fn delete(
         error.ByteSpanZero => return error.DeleteZero,
         error.ByteSpanTooLong => return err,
     };
+
+    const pieces = self._piece_tbl.items;
     const frs = find(
         2,
-        self._piece_tbl.items,
+        pieces,
         .{ delete_span.start, delete_span.end() - 1 },
     ) orelse return error.DeleteTooLong;
 
@@ -204,13 +210,15 @@ pub fn delete(
     var n: usize = 0;
 
     if (first.offset > 0) {
-        var p = first.piece;
+        var p = pieces[first.idx];
         p.span = try p.span.resize(first.offset);
         replacements[n] = p;
         n += 1;
     }
-    if (last.piece.span.len > last.offset + 1) {
-        var p = last.piece;
+
+    const last_piece = pieces[last.idx];
+    if (last_piece.span.len > last.offset + 1) {
+        var p = last_piece;
         p.span = try p.span.advance(last.offset + 1);
         replacements[n] = p;
         n += 1;
@@ -240,27 +248,32 @@ pub fn insert(
     const add_buf_len =
         math.cast(Limits.Size, self._add_buf.items.len) orelse unreachable;
 
-    const fr = if (find(1, self._piece_tbl.items, .{insert_span.start})) |t| t[0] else {
+    const pieces = self._piece_tbl.items;
+
+    const fr = if (find(1, pieces, .{insert_span.start})) |t| t[0] else {
         const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
         try self._piece_tbl.appendBounded(.{ .tag = .add, .span = new_span });
         return;
     };
 
+    // Piece the insert will happen in.
+    const piece = pieces[fr.idx];
+
     // If cursor is after most recently inserted, we can mutate piece in place
-    if (fr.offset == fr.piece.span.len and
-        fr.piece.tag == .add and
-        fr.piece.span.end() == self._add_buf.items.len)
+    if (fr.offset == piece.span.len and
+        piece.tag == .add and
+        piece.span.end() == self._add_buf.items.len)
     {
         const new_len = math.add(
             Limits.Size,
-            fr.piece.span.len,
+            piece.span.len,
             insert_span.len,
         ) catch unreachable;
 
         try self._add_buf.appendSliceBounded(text);
         var p = self._piece_tbl.items[fr.idx];
-        p.span = try fr.piece.span.resize(new_len);
+        p.span = try piece.span.resize(new_len);
         return;
     }
 
@@ -273,16 +286,16 @@ pub fn insert(
             fr.idx,
             .{ .tag = .add, .span = new_span },
         );
-    } else if (fr.offset == fr.piece.span.len) {
+    } else if (fr.offset == piece.span.len) {
         // Insert after target; nothing removed.
         try self._piece_tbl.insertBounded(
             fr.idx + 1,
             .{ .tag = .add, .span = new_span },
         );
     } else {
-        var head = fr.piece;
+        var head = piece;
         head.span = try head.span.resize(fr.offset);
-        var tail = fr.piece;
+        var tail = piece;
         tail.span = try tail.span.advance(fr.offset);
         const replacements =
             [_]Piece{
@@ -461,3 +474,26 @@ test "inserts at end of non-empty file" {
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("hello world", seq.written());
 }
+
+// TODO: Maybe we do want to bloat piece table? that's another undo after all
+// BUT that means every char insert is 8 bytes... per char undo could use text buf?
+//test "optimization; two consecutive inserts should not bloat piecetable" {
+//    var aa = heap.ArenaAllocator.init(ta);
+//    defer aa.deinit();
+//    const a = aa.allocator();
+//
+//    // "ac" -> insert "b" at 1 -> "abc" -> insert "d" right after the "b" -> "abdc"
+//    var f = try Self.init(a, Limits{}, "ac");
+//    try f.insert(1, "b");
+//    try f.insert(2, "d");
+//
+//    try testing.expectEqualSlices(
+//        Piece,
+//        &[_]Piece{
+//            .{ .tag = .original, .span = .{ .start = 0, .len = 1 } }, // "a"
+//            .{ .tag = .add, .span = .{ .start = 0, .len = 2 } }, // "bd" merged
+//            .{ .tag = .original, .span = .{ .start = 1, .len = 1 } }, // "c"
+//        },
+//        f._piece_tbl.items,
+//    );
+//}
