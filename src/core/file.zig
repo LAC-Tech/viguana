@@ -109,8 +109,7 @@ const PieceTbl = struct {
     fn init(a: mem.Allocator, limits: Limits, file_buf_len: Limits.Size) !@This() {
         var tbl = try ArrayList(Piece).initCapacity(
             a,
-            // + 1 because piece tables start with one entry already
-            limits.edits_until_swap_write + 1,
+            limits.edits_until_swap_write,
         );
         const initial_span = if (ByteSpan.init(
             0,
@@ -197,7 +196,7 @@ _pieces: PieceTbl,
 
 pub fn memory_needed(limits: Limits) usize {
     return (limits.new_chars_until_swap_write * @sizeOf(u8)) +
-        ((limits.edits_until_swap_write + 1) * @sizeOf(PieceTbl.Piece));
+        (limits.edits_until_swap_write * @sizeOf(PieceTbl.Piece));
 }
 
 pub fn init(
