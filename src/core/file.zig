@@ -145,10 +145,10 @@ const PieceTbl = struct {
         };
     }
 
-    pub const Location = struct { idx: usize, offset: Limits.Size, piece: Piece };
+    const Location = struct { idx: usize, offset: Limits.Size, piece: Piece };
 
     /// Positions must be ascending
-    pub fn find(
+    fn find(
         self: *@This(),
         comptime n: usize,
         positions: [n]Limits.Size,
@@ -172,7 +172,7 @@ const PieceTbl = struct {
         return null;
     }
 
-    pub fn replaceRange(
+    fn replaceRange(
         self: *@This(),
         first_idx: usize,
         last_idx: usize,
@@ -185,7 +185,7 @@ const PieceTbl = struct {
         );
     }
 
-    pub fn insert(self: *@This(), idx: usize, p: Piece) !void {
+    fn insert(self: *@This(), idx: usize, p: Piece) !void {
         try self._tbl.insertBounded(idx, p);
     }
 
@@ -347,8 +347,6 @@ pub fn insert(
     }
 }
 
-// TODO: this is an iterator for the piecetable - it belongs there.
-// And we can get rid of `span! too
 const Iterator = struct {
     file: *const Self,
     piece_idx: usize,
