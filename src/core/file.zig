@@ -79,91 +79,40 @@ const ByteSpan = packed struct(u62) {
     }
 };
 
-// Some of these methods are quite thin; but we may store the pieces as a gap
-// buffer later.
-const PieceTbl = struct {
-    const Piece = packed struct(u64) {
-        tag: enum(u1) { original, add },
-        _reserved: u1 = 0,
-        span: ByteSpan,
-    };
-
-    _tbl: ArrayList(Piece),
-    // TODO: should be possible to calculate this? would make some checks easier
-    //projected_len: usize = 0,
-
-    fn init(a: mem.Allocator, limits: Limits, file_buf_len: Limits.Size) !@This() {
-        var tbl = try ArrayList(Piece).initCapacity(
-            a,
-            limits.edits_until_swap_write,
-        );
-        const initial_span = if (ByteSpan.init(
-            0,
-            file_buf_len,
-        )) |span| span else |err| switch (err) {
-            error.ByteSpanZero => null,
-            error.ByteSpanTooLong => return error.OriginalFileTooLarge,
-        };
-
-        if (initial_span) |bs| {
-            try tbl.appendBounded(.{ .tag = .original, .span = bs });
-        }
-
-        return .{ ._tbl = tbl };
-    }
-
-    const FindRes = struct { idx: usize, offset: Limits.Size, piece: Piece };
-
-    /// Positions must be ascending
-    fn find(
-        self: *@This(),
-        comptime n: usize,
-        positions: [n]Limits.Size,
-    ) ?[n]FindRes {
-        var result: [n]FindRes = undefined;
-        var next: usize = 0;
-        var cursor: Limits.Size = 0;
-
-        for (self._tbl.items, 0..) |p, i| {
-            while (next < n and cursor + p.span.len > positions[next]) {
-                result[next] = .{
-                    .idx = i,
-                    .offset = positions[next] - cursor,
-                    .piece = p,
-                };
-                next += 1;
-            }
-            if (next == n) return result;
-            cursor += p.span.len;
-        }
-        return null;
-    }
-
-    fn replaceRange(
-        self: *@This(),
-        first_idx: usize,
-        last_idx: usize,
-        replacements: []const Piece,
-    ) !void {
-        try self._tbl.replaceRangeBounded(
-            first_idx,
-            last_idx - first_idx + 1,
-            replacements,
-        );
-    }
-
-    fn insert(self: *@This(), idx: usize, p: Piece) !void {
-        try self._tbl.insertBounded(idx, p);
-    }
-
-    fn append(self: *@This(), piece: Piece) !void {
-        try self._tbl.appendBounded(piece);
-    }
-
-    fn getRef(self: @This(), idx: usize) ?*Piece {
-        return if (idx >= self._tbl.items.len) null else &self._tbl.items[idx];
-    }
+const Piece = packed struct(u64) {
+    tag: enum(u1) { original, add },
+    _reserved: u1 = 0,
+    span: ByteSpan,
 };
+
+// TODO better name - not only the struct but the fields within
+const FindRes = struct { idx: usize, offset: Limits.Size, piece: Piece };
+
+/// Positions must be ascending
+// TODO better name
+fn find(
+    comptime n: usize,
+    pieces: []const Piece,
+    positions: [n]Limits.Size,
+) ?[n]FindRes {
+    var result: [n]FindRes = undefined;
+    var next: usize = 0;
+    var cursor: Limits.Size = 0;
+
+    for (pieces, 0..) |p, i| {
+        while (next < n and cursor + p.span.len > positions[next]) {
+            result[next] = .{
+                .idx = i,
+                .offset = positions[next] - cursor,
+                .piece = p,
+            };
+            next += 1;
+        }
+        if (next == n) return result;
+        cursor += p.span.len;
+    }
+    return null;
+}
 
 const Self = @This();
 
@@ -171,11 +120,11 @@ const Self = @This();
 _file_buf: []const u8,
 /// Append only buffer to a temp file
 _add_buf: ArrayList(u8),
-_pieces: PieceTbl,
+_piece_tbl: ArrayList(Piece),
 
 pub fn memory_needed(limits: Limits) usize {
     return (limits.new_chars_until_swap_write * @sizeOf(u8)) +
-        (limits.edits_until_swap_write * @sizeOf(PieceTbl.Piece));
+        (limits.edits_until_swap_write * @sizeOf(Piece));
 }
 
 pub fn init(
@@ -188,18 +137,35 @@ pub fn init(
         file_buf.len,
     ) orelse return error.OriginalFileTooLarge;
 
+    var piece_tbl = try ArrayList(Piece).initCapacity(
+        a,
+        limits.edits_until_swap_write,
+    );
+    const initial_span = if (ByteSpan.init(
+        0,
+        file_buf_len,
+    )) |span| span else |err| switch (err) {
+        error.ByteSpanZero => null,
+        error.ByteSpanTooLong => return error.OriginalFileTooLarge,
+    };
+
+    if (initial_span) |bs| {
+        try piece_tbl.appendBounded(.{ .tag = .original, .span = bs });
+    }
+
     return .{
         ._file_buf = file_buf,
         ._add_buf = try ArrayList(u8).initCapacity(
             a,
             limits.new_chars_until_swap_write,
         ),
-        ._pieces = try PieceTbl.init(a, limits, file_buf_len),
+        ._piece_tbl = piece_tbl,
     };
 }
 
 fn bufAt(self: @This(), idx: usize) ?[]const u8 {
-    const p = self._pieces.getRef(idx) orelse return null;
+    if (idx >= self._piece_tbl.items.len) return null;
+    const p = &self._piece_tbl.items[idx];
     const buf = switch (p.tag) {
         .original => self._file_buf,
         .add => self._add_buf.items,
@@ -225,16 +191,16 @@ pub fn delete(
         error.ByteSpanZero => return error.DeleteZero,
         error.ByteSpanTooLong => return err,
     };
-    const frs = self._pieces.find(
+    const frs = find(
         2,
+        self._piece_tbl.items,
         .{ delete_span.start, delete_span.end() - 1 },
     ) orelse return error.DeleteTooLong;
 
     const first = frs[0];
     const last = frs[1];
-    const last_tail_offset = last.offset + 1;
 
-    var replacements: [2]PieceTbl.Piece = undefined;
+    var replacements: [2]Piece = undefined;
     var n: usize = 0;
 
     if (first.offset > 0) {
@@ -243,14 +209,18 @@ pub fn delete(
         replacements[n] = p;
         n += 1;
     }
-    if (last_tail_offset < last.piece.span.len) {
+    if (last.piece.span.len > last.offset + 1) {
         var p = last.piece;
-        p.span = try p.span.advance(last_tail_offset);
+        p.span = try p.span.advance(last.offset + 1);
         replacements[n] = p;
         n += 1;
     }
 
-    try self._pieces.replaceRange(first.idx, last.idx, replacements[0..n]);
+    try self._piece_tbl.replaceRangeBounded(
+        first.idx,
+        last.idx - first.idx + 1,
+        replacements[0..n],
+    );
 }
 
 pub fn insert(
@@ -270,52 +240,59 @@ pub fn insert(
     const add_buf_len =
         math.cast(Limits.Size, self._add_buf.items.len) orelse unreachable;
 
-    const fr = if (self._pieces.find(1, .{insert_span.start})) |t| t[0] else {
+    const fr = if (find(1, self._piece_tbl.items, .{insert_span.start})) |t| t[0] else {
         const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
-        try self._pieces.append(.{ .tag = .add, .span = new_span });
+        try self._piece_tbl.appendBounded(.{ .tag = .add, .span = new_span });
         return;
     };
 
-    const piece = fr.piece;
-    const offset = fr.offset;
-    const target_idx = fr.idx;
-
     // If cursor is after most recently inserted, we can mutate piece in place
-    if (offset == piece.span.len and
-        piece.tag == .add and
-        piece.span.end() == self._add_buf.items.len)
+    if (fr.offset == fr.piece.span.len and
+        fr.piece.tag == .add and
+        fr.piece.span.end() == self._add_buf.items.len)
     {
         const new_len = math.add(
             Limits.Size,
-            piece.span.len,
+            fr.piece.span.len,
             insert_span.len,
         ) catch unreachable;
 
         try self._add_buf.appendSliceBounded(text);
-        var p = self._pieces.getRef(fr.idx) orelse unreachable;
-        p.span = try piece.span.resize(new_len);
+        var p = self._piece_tbl.items[fr.idx];
+        p.span = try fr.piece.span.resize(new_len);
         return;
     }
 
     const new_span = try insert_span.moveTo(add_buf_len);
     try self._add_buf.appendSliceBounded(text);
 
-    if (offset == 0) {
+    if (fr.offset == 0) {
         // Insert before target; nothing removed.
-        try self._pieces.insert(target_idx, .{ .tag = .add, .span = new_span });
-    } else if (offset == piece.span.len) {
+        try self._piece_tbl.insertBounded(
+            fr.idx,
+            .{ .tag = .add, .span = new_span },
+        );
+    } else if (fr.offset == fr.piece.span.len) {
         // Insert after target; nothing removed.
-        try self._pieces.insert(target_idx + 1, .{ .tag = .add, .span = new_span });
+        try self._piece_tbl.insertBounded(
+            fr.idx + 1,
+            .{ .tag = .add, .span = new_span },
+        );
     } else {
-        var head = piece;
-        head.span = try head.span.resize(offset);
-        var tail = piece;
-        tail.span = try tail.span.advance(offset);
+        var head = fr.piece;
+        head.span = try head.span.resize(fr.offset);
+        var tail = fr.piece;
+        tail.span = try tail.span.advance(fr.offset);
         const replacements =
-            [_]PieceTbl.Piece{ head, .{ .tag = .add, .span = new_span }, tail };
+            [_]Piece{
+                head,
+                .{ .tag = .add, .span = new_span },
+                tail,
+            };
 
-        try self._pieces.replaceRange(target_idx, target_idx, &replacements);
+        // TODO: length 1, but 3 replacements?
+        try self._piece_tbl.replaceRangeBounded(fr.idx, 1, &replacements);
     }
 }
 
@@ -347,15 +324,15 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("", f._add_buf.items);
     try testing.expectEqual(0, f._add_buf.items.len);
     try testing.expectEqualSlices(
-        PieceTbl.Piece,
-        &[_]PieceTbl.Piece{.{
+        Piece,
+        &[_]Piece{.{
             .tag = .original,
             .span = try ByteSpan.init(
                 0,
                 20, // Paper says 19, but that looks to be an off by 1 error
             ),
         }},
-        f._pieces._tbl.items,
+        f._piece_tbl.items,
     );
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("A large span of text", seq.written());
@@ -365,12 +342,12 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("A large span of text", f._file_buf);
     try testing.expectEqualStrings("", f._add_buf.items);
     try testing.expectEqualSlices(
-        PieceTbl.Piece,
-        &[_]PieceTbl.Piece{
+        Piece,
+        &[_]Piece{
             .{ .tag = .original, .span = .{ .start = 0, .len = 2 } },
             .{ .tag = .original, .span = .{ .start = 8, .len = 12 } },
         },
-        f._pieces._tbl.items,
+        f._piece_tbl.items,
     );
     seq.clearRetainingCapacity();
     try f.writeSequence(&seq.writer);
@@ -381,14 +358,14 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("A large span of text", f._file_buf);
     try testing.expectEqualStrings("English ", f._add_buf.items);
     try testing.expectEqualSlices(
-        PieceTbl.Piece,
-        &[_]PieceTbl.Piece{
+        Piece,
+        &[_]Piece{
             .{ .tag = .original, .span = .{ .start = 0, .len = 2 } },
             .{ .tag = .original, .span = .{ .start = 8, .len = 8 } },
             .{ .tag = .add, .span = .{ .start = 0, .len = 8 } },
             .{ .tag = .original, .span = .{ .start = 16, .len = 4 } },
         },
-        f._pieces._tbl.items,
+        f._piece_tbl.items,
     );
     seq.clearRetainingCapacity();
     try f.writeSequence(&seq.writer);
