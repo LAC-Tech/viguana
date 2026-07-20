@@ -33,6 +33,7 @@ pub const Err = struct {
     const Insert = error{
         InsertZero,
         InsertTooLong,
+        InsertAddBufFull,
     };
 
     const ByteSpan = error{
@@ -85,7 +86,7 @@ const Piece = packed struct(u64) {
     span: ByteSpan,
 };
 
-// TODO better name - not only the struct but the fields within
+// TODO better name
 const FindRes = struct {
     // idx of the piece the position is found in
     idx: usize,
@@ -141,17 +142,14 @@ pub fn init(
         file_buf.len,
     ) orelse return error.OriginalFileTooLarge;
 
-    var piece_tbl = try ArrayList(Piece).initCapacity(
-        a,
-        limits.edits_until_swap_write,
-    );
-    const initial_span = if (ByteSpan.init(
-        0,
-        file_buf_len,
-    )) |span| span else |err| switch (err) {
-        error.ByteSpanZero => null,
-        error.ByteSpanTooLong => return error.OriginalFileTooLarge,
-    };
+    var piece_tbl =
+        try ArrayList(Piece).initCapacity(a, limits.edits_until_swap_write);
+
+    const initial_span =
+        if (ByteSpan.init(0, file_buf_len)) |bs| bs else |err| switch (err) {
+            error.ByteSpanZero => null,
+            error.ByteSpanTooLong => return error.OriginalFileTooLarge,
+        };
 
     if (initial_span) |bs| {
         try piece_tbl.appendBounded(.{ .tag = .original, .span = bs });
@@ -168,8 +166,8 @@ pub fn init(
 }
 
 fn bufAt(self: @This(), idx: usize) ?[]const u8 {
-    if (idx >= self._piece_tbl.items.len) return null;
-    const p = &self._piece_tbl.items[idx];
+    const pieces = self._piece_tbl.items;
+    const p = if (pieces.len > idx) pieces[idx] else return null;
     const buf = switch (p.tag) {
         .original => self._file_buf,
         .add => self._add_buf.items,
@@ -243,70 +241,66 @@ pub fn insert(
         else => return err,
     };
 
-    // The user has inserted two gigabytes of text before we went to swap?
-    // I think we can safely panic.
-    const add_buf_len =
-        math.cast(Limits.Size, self._add_buf.items.len) orelse unreachable;
+    const add_buf_len = math.cast(
+        Limits.Size,
+        self._add_buf.items.len,
+    ) orelse return error.InsertAddBufFull;
 
     const pieces = self._piece_tbl.items;
 
     const fr = if (find(1, pieces, .{insert_span.start})) |t| t[0] else {
+        // Past the end of every piece: append fresh.
         const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
         try self._piece_tbl.appendBounded(.{ .tag = .add, .span = new_span });
         return;
     };
 
-    // Piece the insert will happen in.
-    const piece = pieces[fr.idx];
+    // find() always resolves a boundary position to offset 0 of the
+    // *following* piece. So the mergeable candidate at a boundary is
+    // always the piece just before fr.idx, never pieces[fr.idx] itself.
+    if (fr.offset == 0 and fr.idx > 0) {
+        const prev = pieces[fr.idx - 1];
+        if (prev.tag == .add and prev.span.end() == add_buf_len) {
+            const new_len = math.add(
+                Limits.Size,
+                prev.span.len,
+                insert_span.len,
+            ) catch unreachable;
 
-    // If cursor is after most recently inserted, we can mutate piece in place
-    if (fr.offset == piece.span.len and
-        piece.tag == .add and
-        piece.span.end() == self._add_buf.items.len)
-    {
-        const new_len = math.add(
-            Limits.Size,
-            piece.span.len,
-            insert_span.len,
-        ) catch unreachable;
+            try self._add_buf.appendSliceBounded(text);
+            const p = &self._piece_tbl.items[fr.idx - 1];
+            p.span = try prev.span.resize(new_len);
+            return;
+        }
 
+        // Boundary, but nothing to merge with: insert before target.
+        const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
-        var p = self._piece_tbl.items[fr.idx];
-        p.span = try piece.span.resize(new_len);
-        return;
-    }
-
-    const new_span = try insert_span.moveTo(add_buf_len);
-    try self._add_buf.appendSliceBounded(text);
-
-    if (fr.offset == 0) {
-        // Insert before target; nothing removed.
         try self._piece_tbl.insertBounded(
             fr.idx,
             .{ .tag = .add, .span = new_span },
         );
-    } else if (fr.offset == piece.span.len) {
-        // Insert after target; nothing removed.
-        try self._piece_tbl.insertBounded(
-            fr.idx + 1,
-            .{ .tag = .add, .span = new_span },
-        );
-    } else {
-        var head = piece;
-        head.span = try head.span.resize(fr.offset);
-        var tail = piece;
-        tail.span = try tail.span.advance(fr.offset);
-        const replacements =
-            [_]Piece{
-                head,
-                .{ .tag = .add, .span = new_span },
-                tail,
-            };
-
-        // TODO: length 1, but 3 replacements?
-        try self._piece_tbl.replaceRangeBounded(fr.idx, 1, &replacements);
+        return;
     }
+
+    // Interior split: 0 < fr.offset < piece.span.len is guaranteed here.
+    const piece = pieces[fr.idx];
+    const new_span = try insert_span.moveTo(add_buf_len);
+    try self._add_buf.appendSliceBounded(text);
+
+    var head = piece;
+    head.span = try head.span.resize(fr.offset);
+    var tail = piece;
+    tail.span = try tail.span.advance(fr.offset);
+    const replacements = [_]Piece{
+        head,
+        .{ .tag = .add, .span = new_span },
+        tail,
+    };
+
+    // Splitting one piece into up to 3: head, new text, tail.
+    try self._piece_tbl.replaceRangeBounded(fr.idx, 1, &replacements);
 }
 
 const Iterator = struct {
@@ -475,25 +469,26 @@ test "inserts at end of non-empty file" {
     try testing.expectEqualStrings("hello world", seq.written());
 }
 
-// TODO: Maybe we do want to bloat piece table? that's another undo after all
-// BUT that means every char insert is 8 bytes... per char undo could use text buf?
-//test "optimization; two consecutive inserts should not bloat piecetable" {
-//    var aa = heap.ArenaAllocator.init(ta);
-//    defer aa.deinit();
-//    const a = aa.allocator();
-//
-//    // "ac" -> insert "b" at 1 -> "abc" -> insert "d" right after the "b" -> "abdc"
-//    var f = try Self.init(a, Limits{}, "ac");
-//    try f.insert(1, "b");
-//    try f.insert(2, "d");
-//
-//    try testing.expectEqualSlices(
-//        Piece,
-//        &[_]Piece{
-//            .{ .tag = .original, .span = .{ .start = 0, .len = 1 } }, // "a"
-//            .{ .tag = .add, .span = .{ .start = 0, .len = 2 } }, // "bd" merged
-//            .{ .tag = .original, .span = .{ .start = 1, .len = 1 } }, // "c"
-//        },
-//        f._piece_tbl.items,
-//    );
-//}
+test "two consecutive inserts should not bloat piecetable" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+    var seq = std.Io.Writer.Allocating.init(a);
+
+    var f = try Self.init(a, Limits{}, "ad");
+    try f.insert(1, "b");
+    try f.insert(2, "c");
+
+    try testing.expectEqualSlices(
+        Piece,
+        &[_]Piece{
+            .{ .tag = .original, .span = .{ .start = 0, .len = 1 } },
+            .{ .tag = .add, .span = .{ .start = 0, .len = 2 } }, // "
+            .{ .tag = .original, .span = .{ .start = 1, .len = 1 } },
+        },
+        f._piece_tbl.items,
+    );
+
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("abcd", seq.written());
+}
