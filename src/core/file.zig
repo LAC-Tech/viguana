@@ -43,9 +43,12 @@ pub const Err = struct {
     const Alloc = mem.Allocator.Error;
 };
 
-const ByteSpan = packed struct(u62) {
+const ByteSpan = packed struct(u64) {
+    const Tag = enum(u2) { original, add, unset };
+
     start: Limits.Size,
     len: Limits.Size,
+    tag: Tag = .unset,
 
     fn init(start: Limits.Size, len: Limits.Size) Err.ByteSpan!ByteSpan {
         _ = math.add(
@@ -54,6 +57,17 @@ const ByteSpan = packed struct(u62) {
             len,
         ) catch return error.ByteSpanTooLong;
         return .{ .start = start, .len = len };
+    }
+
+    fn withTag(self: ByteSpan, tag: Tag) ByteSpan {
+        var result = self;
+        result.tag = tag;
+        return result;
+    }
+
+    fn initTag(start: Limits.Size, len: Limits.Size, tag: Tag) Err.ByteSpan!ByteSpan {
+        const result = try ByteSpan.init(start, len);
+        return result.withTag(tag);
     }
 
     fn empty(self: ByteSpan) bool {
@@ -70,22 +84,16 @@ const ByteSpan = packed struct(u62) {
     }
 
     fn resize(self: ByteSpan, new_len: Limits.Size) Err.ByteSpan!ByteSpan {
-        return ByteSpan.init(self.start, new_len);
+        return ByteSpan.initTag(self.start, new_len, self.tag);
     }
 
     fn advance(self: ByteSpan, offset: Limits.Size) Err.ByteSpan!ByteSpan {
-        return ByteSpan.init(self.start + offset, self.len - offset);
+        return ByteSpan.initTag(self.start + offset, self.len - offset, self.tag);
     }
 
     fn moveTo(self: ByteSpan, new_start: Limits.Size) Err.ByteSpan!ByteSpan {
-        return ByteSpan.init(new_start, self.len);
+        return ByteSpan.initTag(new_start, self.len, self.tag);
     }
-};
-
-const Piece = packed struct(u64) {
-    tag: enum(u1) { original, add },
-    _reserved: u1 = 0,
-    span: ByteSpan,
 };
 
 // TODO better name
@@ -100,15 +108,15 @@ const FindRes = struct {
 // TODO better name
 fn find(
     comptime n: usize,
-    pieces: []const Piece,
+    spans: []const ByteSpan,
     positions: [n]Limits.Size,
 ) ?[n]FindRes {
     var result: [n]FindRes = undefined;
     var next: usize = 0;
     var cursor: Limits.Size = 0;
 
-    for (pieces, 0..) |p, i| {
-        while (next < n and cursor + p.span.len > positions[next]) {
+    for (spans, 0..) |span, i| {
+        while (next < n and cursor + span.len > positions[next]) {
             result[next] = .{
                 .idx = i,
                 .offset = positions[next] - cursor,
@@ -116,7 +124,7 @@ fn find(
             next += 1;
         }
         if (next == n) return result;
-        cursor += p.span.len;
+        cursor += span.len;
     }
     return null;
 }
@@ -127,11 +135,11 @@ const Self = @This();
 _file_buf: []const u8,
 /// Append only buffer to a temp file
 _add_buf: ArrayList(u8),
-_piece_tbl: ArrayList(Piece),
+_piece_tbl: ArrayList(ByteSpan),
 
 pub fn memory_needed(limits: Limits) usize {
     return (limits.new_chars_until_swap_write * @sizeOf(u8)) +
-        (limits.edits_until_swap_write * @sizeOf(Piece));
+        (limits.edits_until_swap_write * @sizeOf(ByteSpan));
 }
 
 pub fn init(
@@ -145,7 +153,7 @@ pub fn init(
     ) orelse return error.OriginalFileTooLarge;
 
     var piece_tbl =
-        try ArrayList(Piece).initCapacity(a, limits.edits_until_swap_write);
+        try ArrayList(ByteSpan).initCapacity(a, limits.edits_until_swap_write);
 
     const initial_span =
         if (ByteSpan.init(0, file_buf_len)) |bs| bs else |err| switch (err) {
@@ -155,7 +163,7 @@ pub fn init(
     // TODO: needed? I think an empty span would just get mutated...
     // TODO test that captures this
     if (!initial_span.empty()) {
-        try piece_tbl.appendBounded(.{ .tag = .original, .span = initial_span });
+        try piece_tbl.appendBounded(initial_span.withTag(.original));
     }
 
     return .{
@@ -174,9 +182,10 @@ fn bufAt(self: @This(), idx: usize) ?[]const u8 {
     const buf = switch (p.tag) {
         .original => self._file_buf,
         .add => self._add_buf.items,
+        .unset => @panic("untagged byte span stored in piece table"),
     };
 
-    return p.span.slice(buf);
+    return p.slice(buf);
 }
 
 // Derived/logical text
@@ -208,21 +217,17 @@ pub fn delete(
     const first = frs[0];
     const last = frs[1];
 
-    var replacements: [2]Piece = undefined;
+    var replacements: [2]ByteSpan = undefined;
     var n: usize = 0;
 
     if (first.offset > 0) {
-        var p = pieces[first.idx];
-        p.span = try p.span.resize(first.offset);
-        replacements[n] = p;
+        replacements[n] = try pieces[first.idx].resize(first.offset);
         n += 1;
     }
 
     const last_piece = pieces[last.idx];
-    if (last_piece.span.len > last.offset + 1) {
-        var p = last_piece;
-        p.span = try p.span.advance(last.offset + 1);
-        replacements[n] = p;
+    if (last_piece.len > last.offset + 1) {
+        replacements[n] = try pieces[last.idx].advance(last.offset + 1);
         n += 1;
     }
 
@@ -257,7 +262,7 @@ pub fn insert(
         // Past the end of every piece: append fresh.
         const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
-        try self._piece_tbl.appendBounded(.{ .tag = .add, .span = new_span });
+        try self._piece_tbl.appendBounded(new_span.withTag(.add));
         return;
     };
 
@@ -266,26 +271,23 @@ pub fn insert(
     // always the piece just before fr.idx, never pieces[fr.idx] itself.
     if (fr.offset == 0 and fr.idx > 0) {
         const prev = pieces[fr.idx - 1];
-        if (prev.tag == .add and prev.span.end() == add_buf_len) {
+        if (prev.tag == .add and prev.end() == add_buf_len) {
             const new_len = math.add(
                 Limits.Size,
-                prev.span.len,
+                prev.len,
                 insert_span.len,
             ) catch unreachable;
 
             try self._add_buf.appendSliceBounded(text);
             const p = &self._piece_tbl.items[fr.idx - 1];
-            p.span = try prev.span.resize(new_len);
+            p.* = try prev.resize(new_len);
             return;
         }
 
         // Boundary, but nothing to merge with: insert before target.
         const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
-        try self._piece_tbl.insertBounded(
-            fr.idx,
-            .{ .tag = .add, .span = new_span },
-        );
+        try self._piece_tbl.insertBounded(fr.idx, new_span.withTag(.add));
         return;
     }
 
@@ -294,14 +296,10 @@ pub fn insert(
     const new_span = try insert_span.moveTo(add_buf_len);
     try self._add_buf.appendSliceBounded(text);
 
-    var head = piece;
-    head.span = try head.span.resize(fr.offset);
-    var tail = piece;
-    tail.span = try tail.span.advance(fr.offset);
-    const replacements = [_]Piece{
-        head,
-        .{ .tag = .add, .span = new_span },
-        tail,
+    const replacements = [_]ByteSpan{
+        try piece.resize(fr.offset),
+        new_span.withTag(.add),
+        try piece.advance(fr.offset),
     };
 
     // Splitting one piece into up to 3: head, new text, tail.
@@ -336,13 +334,11 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("", f._add_buf.items);
     try testing.expectEqual(0, f._add_buf.items.len);
     try testing.expectEqualSlices(
-        Piece,
-        &[_]Piece{.{
+        ByteSpan,
+        &[_]ByteSpan{.{
             .tag = .original,
-            .span = try ByteSpan.init(
-                0,
-                20, // Paper says 19, but that looks to be an off by 1 error
-            ),
+            .start = 0,
+            .len = 20, // Paper says 19, but that looks to be an off by 1 error
         }},
         f._piece_tbl.items,
     );
@@ -354,10 +350,10 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("A large span of text", f._file_buf);
     try testing.expectEqualStrings("", f._add_buf.items);
     try testing.expectEqualSlices(
-        Piece,
-        &[_]Piece{
-            .{ .tag = .original, .span = .{ .start = 0, .len = 2 } },
-            .{ .tag = .original, .span = .{ .start = 8, .len = 12 } },
+        ByteSpan,
+        &[_]ByteSpan{
+            .{ .tag = .original, .start = 0, .len = 2 },
+            .{ .tag = .original, .start = 8, .len = 12 },
         },
         f._piece_tbl.items,
     );
@@ -370,12 +366,12 @@ test "Crowley paper tests" {
     try testing.expectEqualStrings("A large span of text", f._file_buf);
     try testing.expectEqualStrings("English ", f._add_buf.items);
     try testing.expectEqualSlices(
-        Piece,
-        &[_]Piece{
-            .{ .tag = .original, .span = .{ .start = 0, .len = 2 } },
-            .{ .tag = .original, .span = .{ .start = 8, .len = 8 } },
-            .{ .tag = .add, .span = .{ .start = 0, .len = 8 } },
-            .{ .tag = .original, .span = .{ .start = 16, .len = 4 } },
+        ByteSpan,
+        &[_]ByteSpan{
+            .{ .tag = .original, .start = 0, .len = 2 },
+            .{ .tag = .original, .start = 8, .len = 8 },
+            .{ .tag = .add, .start = 0, .len = 8 },
+            .{ .tag = .original, .start = 16, .len = 4 },
         },
         f._piece_tbl.items,
     );
@@ -485,11 +481,11 @@ test "two consecutive inserts should not bloat piecetable" {
     try f.insert(2, "c");
 
     try testing.expectEqualSlices(
-        Piece,
-        &[_]Piece{
-            .{ .tag = .original, .span = .{ .start = 0, .len = 1 } },
-            .{ .tag = .add, .span = .{ .start = 0, .len = 2 } }, // "
-            .{ .tag = .original, .span = .{ .start = 1, .len = 1 } },
+        ByteSpan,
+        &[_]ByteSpan{
+            .{ .tag = .original, .start = 0, .len = 1 },
+            .{ .tag = .add, .start = 0, .len = 2 },
+            .{ .tag = .original, .start = 1, .len = 1 },
         },
         f._piece_tbl.items,
     );
