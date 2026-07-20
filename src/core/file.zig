@@ -179,7 +179,9 @@ pub fn delete(
 
     var cursor: Limits.Size = 0;
     var first_idx: usize = 0;
-    while (first_idx < pieces.len and cursor + pieces[first_idx].len <= delete_span.start) {
+    while (pieces.len > first_idx and
+        delete_span.start >= cursor + pieces[first_idx].len)
+    {
         cursor += pieces[first_idx].len;
         first_idx += 1;
     }
@@ -187,7 +189,9 @@ pub fn delete(
     const first_offset = delete_span.start - cursor;
 
     var last_idx = first_idx;
-    while (last_idx < pieces.len and cursor + pieces[last_idx].len <= last_pos) {
+    while (pieces.len > last_idx and
+        last_pos >= cursor + pieces[last_idx].len)
+    {
         cursor += pieces[last_idx].len;
         last_idx += 1;
     }
@@ -237,7 +241,7 @@ pub fn insert(
 
     var cursor: Limits.Size = 0;
     var idx: usize = 0;
-    while (idx < pieces.len and cursor + pieces[idx].len <= insert_span.start) {
+    while (pieces.len > idx and insert_span.start >= cursor + pieces[idx].len) {
         cursor += pieces[idx].len;
         idx += 1;
     }
@@ -271,9 +275,10 @@ pub fn insert(
         }
 
         // Boundary, but nothing to merge with: insert before target.
-        const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
-        try self._piece_tbl.insertBounded(idx, new_span.withTag(.add));
+
+        const new_span = (try insert_span.moveTo(add_buf_len)).withTag(.add);
+        try self._piece_tbl.insertBounded(idx, new_span);
         return;
     }
 
