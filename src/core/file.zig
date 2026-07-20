@@ -37,7 +37,6 @@ pub const Err = struct {
     };
 
     const ByteSpan = error{
-        ByteSpanZero,
         ByteSpanTooLong,
     };
 
@@ -49,13 +48,16 @@ const ByteSpan = packed struct(u62) {
     len: Limits.Size,
 
     fn init(start: Limits.Size, len: Limits.Size) Err.ByteSpan!ByteSpan {
-        if (len == 0) return error.ByteSpanZero;
         _ = math.add(
             Limits.Size,
             start,
             len,
         ) catch return error.ByteSpanTooLong;
         return .{ .start = start, .len = len };
+    }
+
+    fn empty(self: ByteSpan) bool {
+        return self.len == 0;
     }
 
     /// Safe to compute if Range created through init
@@ -147,12 +149,13 @@ pub fn init(
 
     const initial_span =
         if (ByteSpan.init(0, file_buf_len)) |bs| bs else |err| switch (err) {
-            error.ByteSpanZero => null,
             error.ByteSpanTooLong => return error.OriginalFileTooLarge,
         };
 
-    if (initial_span) |bs| {
-        try piece_tbl.appendBounded(.{ .tag = .original, .span = bs });
+    // TODO: needed? I think an empty span would just get mutated...
+    // TODO test that captures this
+    if (!initial_span.empty()) {
+        try piece_tbl.appendBounded(.{ .tag = .original, .span = initial_span });
     }
 
     return .{
@@ -190,9 +193,10 @@ pub fn delete(
     len: Limits.Size,
 ) (Err.Delete || Err.ByteSpan || Err.Alloc)!void {
     const delete_span = ByteSpan.init(start, len) catch |err| switch (err) {
-        error.ByteSpanZero => return error.DeleteZero,
         error.ByteSpanTooLong => return err,
     };
+
+    if (delete_span.empty()) return error.DeleteZero;
 
     const pieces = self._piece_tbl.items;
     const frs = find(
@@ -237,9 +241,10 @@ pub fn insert(
     const text_len =
         math.cast(Limits.Size, text.len) orelse return error.InsertTooLong;
     const insert_span = ByteSpan.init(pos, text_len) catch |err| switch (err) {
-        error.ByteSpanZero => return error.InsertZero,
         else => return err,
     };
+
+    if (insert_span.empty()) return error.InsertZero;
 
     const add_buf_len = math.cast(
         Limits.Size,
