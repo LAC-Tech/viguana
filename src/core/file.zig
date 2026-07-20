@@ -177,47 +177,36 @@ const Pieces = struct {
 
     /// `add_buf_len` is the length of the add-buffer *before* the text for
     /// this insert was appended -- i.e. where the new text now starts.
-    fn insert(
-        self: *Pieces,
-        span: ByteSpan,
-        add_buf_len: Limits.Size,
-    ) !void {
+    fn insert(self: *Pieces, span: ByteSpan, add_buf_len: Limits.Size) !void {
+        const new_span = (try span.moveTo(add_buf_len)).withTag(.add);
+
         var cur = self.cursor();
         const fr = cur.locate(span.start) orelse {
-            // Past the end of every piece: append fresh.
-            const new_span = try span.moveTo(add_buf_len);
-            try self._spans.appendBounded(new_span.withTag(.add));
+            try self._spans.appendBounded(new_span);
             return;
         };
 
-        // A boundary position (offset 0) resolves to the *following* piece,
-        // so the mergeable candidate is always the piece just before idx,
-        // never pieces[idx] itself.
         if (fr.offset == 0 and fr.idx > 0) {
             const prev = self._spans.items[fr.idx - 1];
-            if (prev.tag == .add and prev.end() == add_buf_len) {
-                const new_len =
-                    math.add(Limits.Size, prev.len, span.len) catch unreachable;
+            if (prev.tag == .add and prev.end() == new_span.len) {
+                const new_len = math.add(
+                    Limits.Size,
+                    prev.len,
+                    span.len,
+                ) catch unreachable;
                 self._spans.items[fr.idx - 1] = try prev.resize(new_len);
                 return;
             }
-
-            // Boundary, but nothing to merge with: insert before target.
-            const new_span = (try span.moveTo(add_buf_len)).withTag(.add);
             try self._spans.insertBounded(fr.idx, new_span);
             return;
         }
 
-        // Interior split: 0 < offset < piece.len is guaranteed here.
         const piece = self._spans.items[fr.idx];
-        const new_span = try span.moveTo(add_buf_len);
         const replacements = [_]ByteSpan{
             try piece.resize(fr.offset),
-            new_span.withTag(.add),
+            new_span,
             try piece.advance(fr.offset),
         };
-
-        // Splitting one piece into up to 3: head, new text, tail.
         try self._spans.replaceRangeBounded(fr.idx, 1, &replacements);
     }
 };
