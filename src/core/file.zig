@@ -96,39 +96,6 @@ const ByteSpan = packed struct(u64) {
     }
 };
 
-// TODO better name
-const FindRes = struct {
-    // idx of the piece the position is found in
-    idx: usize,
-    // byte offset inside said piece it's found in
-    offset: Limits.Size,
-};
-
-/// Positions must be ascending
-// TODO better name
-fn find(
-    comptime n: usize,
-    spans: []const ByteSpan,
-    positions: [n]Limits.Size,
-) ?[n]FindRes {
-    var result: [n]FindRes = undefined;
-    var next: usize = 0;
-    var cursor: Limits.Size = 0;
-
-    for (spans, 0..) |span, i| {
-        while (next < n and cursor + span.len > positions[next]) {
-            result[next] = .{
-                .idx = i,
-                .offset = positions[next] - cursor,
-            };
-            next += 1;
-        }
-        if (next == n) return result;
-        cursor += span.len;
-    }
-    return null;
-}
-
 const Self = @This();
 
 // Read-only buffer to the original file
@@ -208,32 +175,42 @@ pub fn delete(
     if (delete_span.empty()) return error.DeleteZero;
 
     const pieces = self._piece_tbl.items;
-    const frs = find(
-        2,
-        pieces,
-        .{ delete_span.start, delete_span.end() - 1 },
-    ) orelse return error.DeleteTooLong;
+    const last_pos = delete_span.end() - 1;
 
-    const first = frs[0];
-    const last = frs[1];
+    var cursor: Limits.Size = 0;
+    var first_idx: usize = 0;
+    while (first_idx < pieces.len and cursor + pieces[first_idx].len <= delete_span.start) {
+        cursor += pieces[first_idx].len;
+        first_idx += 1;
+    }
+    if (first_idx == pieces.len) return error.DeleteTooLong;
+    const first_offset = delete_span.start - cursor;
+
+    var last_idx = first_idx;
+    while (last_idx < pieces.len and cursor + pieces[last_idx].len <= last_pos) {
+        cursor += pieces[last_idx].len;
+        last_idx += 1;
+    }
+    if (last_idx == pieces.len) return error.DeleteTooLong;
+    const last_offset = last_pos - cursor;
 
     var replacements: [2]ByteSpan = undefined;
     var n: usize = 0;
 
-    if (first.offset > 0) {
-        replacements[n] = try pieces[first.idx].resize(first.offset);
+    if (first_offset > 0) {
+        replacements[n] = try pieces[first_idx].resize(first_offset);
         n += 1;
     }
 
-    const last_piece = pieces[last.idx];
-    if (last_piece.len > last.offset + 1) {
-        replacements[n] = try pieces[last.idx].advance(last.offset + 1);
+    const last_piece = pieces[last_idx];
+    if (last_piece.len > last_offset + 1) {
+        replacements[n] = try pieces[last_idx].advance(last_offset + 1);
         n += 1;
     }
 
     try self._piece_tbl.replaceRangeBounded(
-        first.idx,
-        last.idx - first.idx + 1,
+        first_idx,
+        last_idx - first_idx + 1,
         replacements[0..n],
     );
 }
@@ -258,19 +235,28 @@ pub fn insert(
 
     const pieces = self._piece_tbl.items;
 
-    const fr = if (find(1, pieces, .{insert_span.start})) |t| t[0] else {
+    var cursor: Limits.Size = 0;
+    var idx: usize = 0;
+    while (idx < pieces.len and cursor + pieces[idx].len <= insert_span.start) {
+        cursor += pieces[idx].len;
+        idx += 1;
+    }
+
+    if (idx == pieces.len) {
         // Past the end of every piece: append fresh.
         const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
         try self._piece_tbl.appendBounded(new_span.withTag(.add));
         return;
-    };
+    }
 
-    // find() always resolves a boundary position to offset 0 of the
-    // *following* piece. So the mergeable candidate at a boundary is
-    // always the piece just before fr.idx, never pieces[fr.idx] itself.
-    if (fr.offset == 0 and fr.idx > 0) {
-        const prev = pieces[fr.idx - 1];
+    const offset = insert_span.start - cursor;
+
+    // A boundary position (offset 0) resolves to the *following* piece,
+    // so the mergeable candidate is always the piece just before idx,
+    // never pieces[idx] itself.
+    if (offset == 0 and idx > 0) {
+        const prev = pieces[idx - 1];
         if (prev.tag == .add and prev.end() == add_buf_len) {
             const new_len = math.add(
                 Limits.Size,
@@ -279,7 +265,7 @@ pub fn insert(
             ) catch unreachable;
 
             try self._add_buf.appendSliceBounded(text);
-            const p = &self._piece_tbl.items[fr.idx - 1];
+            const p = &self._piece_tbl.items[idx - 1];
             p.* = try prev.resize(new_len);
             return;
         }
@@ -287,23 +273,23 @@ pub fn insert(
         // Boundary, but nothing to merge with: insert before target.
         const new_span = try insert_span.moveTo(add_buf_len);
         try self._add_buf.appendSliceBounded(text);
-        try self._piece_tbl.insertBounded(fr.idx, new_span.withTag(.add));
+        try self._piece_tbl.insertBounded(idx, new_span.withTag(.add));
         return;
     }
 
-    // Interior split: 0 < fr.offset < piece.span.len is guaranteed here.
-    const piece = pieces[fr.idx];
+    // Interior split: 0 < offset < piece.len is guaranteed here.
+    const piece = pieces[idx];
     const new_span = try insert_span.moveTo(add_buf_len);
     try self._add_buf.appendSliceBounded(text);
 
     const replacements = [_]ByteSpan{
-        try piece.resize(fr.offset),
+        try piece.resize(offset),
         new_span.withTag(.add),
-        try piece.advance(fr.offset),
+        try piece.advance(offset),
     };
 
     // Splitting one piece into up to 3: head, new text, tail.
-    try self._piece_tbl.replaceRangeBounded(fr.idx, 1, &replacements);
+    try self._piece_tbl.replaceRangeBounded(idx, 1, &replacements);
 }
 
 const Iterator = struct {
