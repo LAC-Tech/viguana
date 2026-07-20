@@ -97,17 +97,16 @@ const ByteSpan = packed struct(u64) {
 };
 
 const Pieces = struct {
+    _spans: ArrayList(ByteSpan),
+
     fn cursor(self: *const Pieces) Cursor {
         return .{ .pieces = self._spans.items };
     }
 
-    /// Walks left-to-right, converting logical byte positions into
-    /// (piece index, offset-within-piece). Positions passed to locate()
-    /// must be non-decreasing across calls -- it never rewinds.
     const Cursor = struct {
         pieces: []const ByteSpan,
         idx: usize = 0,
-        pos: Limits.Size = 0, // logical start of pieces[idx]
+        pos: Limits.Size = 0,
 
         const Result = struct { idx: usize, offset: Limits.Size };
 
@@ -123,8 +122,6 @@ const Pieces = struct {
         }
     };
 
-    _spans: ArrayList(ByteSpan),
-
     fn init(
         a: mem.Allocator,
         capacity: Limits.Size,
@@ -137,27 +134,91 @@ const Pieces = struct {
                 error.ByteSpanTooLong => return error.OriginalFileTooLarge,
             };
 
-        // A new file should logically not have an "original" piece.
         if (!initial_span.empty()) {
             try spans.appendBounded(initial_span.withTag(.original));
         }
 
-        return .{
-            ._spans = spans,
-        };
-    }
-
-    fn get(self: Pieces, idx: usize) ByteSpan {
-        return self._spans.items[idx];
-    }
-
-    fn getMut(self: Pieces, idx: usize) *ByteSpan {
-        return &self._spans.items[idx];
+        return .{ ._spans = spans };
     }
 
     fn getOrNull(self: Pieces, idx: usize) ?ByteSpan {
         const spans = self._spans.items;
         return if (spans.len > idx) spans[idx] else null;
+    }
+
+    fn delete(self: *Pieces, span: ByteSpan) !void {
+        const last_pos = span.end() - 1;
+
+        var cur = self.cursor();
+        const first = cur.locate(span.start) orelse return error.DeleteTooLong;
+        const last = cur.locate(last_pos) orelse return error.DeleteTooLong;
+
+        var replacements: [2]ByteSpan = undefined;
+        var n: usize = 0;
+
+        if (first.offset > 0) {
+            const s = try self._spans.items[first.idx].resize(first.offset);
+            replacements[n] = s;
+            n += 1;
+        }
+
+        const last_piece = self._spans.items[last.idx];
+        if (last_piece.len > last.offset + 1) {
+            replacements[n] = try last_piece.advance(last.offset + 1);
+            n += 1;
+        }
+
+        try self._spans.replaceRangeBounded(
+            first.idx,
+            last.idx - first.idx + 1,
+            replacements[0..n],
+        );
+    }
+
+    /// `add_buf_len` is the length of the add-buffer *before* the text for
+    /// this insert was appended -- i.e. where the new text now starts.
+    fn insert(
+        self: *Pieces,
+        span: ByteSpan,
+        add_buf_len: Limits.Size,
+    ) !void {
+        var cur = self.cursor();
+        const fr = cur.locate(span.start) orelse {
+            // Past the end of every piece: append fresh.
+            const new_span = try span.moveTo(add_buf_len);
+            try self._spans.appendBounded(new_span.withTag(.add));
+            return;
+        };
+
+        // A boundary position (offset 0) resolves to the *following* piece,
+        // so the mergeable candidate is always the piece just before idx,
+        // never pieces[idx] itself.
+        if (fr.offset == 0 and fr.idx > 0) {
+            const prev = self._spans.items[fr.idx - 1];
+            if (prev.tag == .add and prev.end() == add_buf_len) {
+                const new_len =
+                    math.add(Limits.Size, prev.len, span.len) catch unreachable;
+                self._spans.items[fr.idx - 1] = try prev.resize(new_len);
+                return;
+            }
+
+            // Boundary, but nothing to merge with: insert before target.
+            const new_span = (try span.moveTo(add_buf_len)).withTag(.add);
+            try self._spans.insertBounded(fr.idx, new_span);
+            return;
+        }
+
+        // Interior split: 0 < offset < piece.len is guaranteed here.
+        const piece = self._spans.items[fr.idx];
+        const new_span = try span.moveTo(add_buf_len);
+        const replacements = [_]ByteSpan{
+            try piece.resize(fr.offset),
+            new_span.withTag(.add),
+            try piece.advance(fr.offset),
+        };
+
+        // Splitting one piece into up to 3: head, new text, tail.
+        try self._spans.replaceRangeBounded(fr.idx, 1, &replacements);
     }
 };
 
@@ -227,34 +288,9 @@ pub fn delete(
     const del_span = ByteSpan.init(start, len) catch |err| switch (err) {
         error.ByteSpanTooLong => return err,
     };
-
     if (del_span.empty()) return error.DeleteZero;
-    const last_pos = del_span.end() - 1;
 
-    var cur = self._pieces.cursor();
-    const first = cur.locate(del_span.start) orelse return error.DeleteTooLong;
-    const last = cur.locate(last_pos) orelse return error.DeleteTooLong;
-
-    var replacements: [2]ByteSpan = undefined;
-    var n: usize = 0;
-
-    if (first.offset > 0) {
-        replacements[n] = try self._pieces.get(first.idx).resize(first.offset);
-        n += 1;
-    }
-
-    const last_piece = self._pieces.get(last.idx);
-    if (last_piece.len > last.offset + 1) {
-        replacements[n] = try self._pieces.get(last.idx).advance(last.offset + 1);
-        n += 1;
-    }
-
-    // TODO: Pieces method
-    try self._pieces._spans.replaceRangeBounded(
-        first.idx,
-        last.idx - first.idx + 1,
-        replacements[0..n],
-    );
+    try self._pieces.delete(del_span);
 }
 
 pub fn insert(
@@ -267,7 +303,6 @@ pub fn insert(
     const ins_span = ByteSpan.init(pos, text_len) catch |err| switch (err) {
         else => return err,
     };
-
     if (ins_span.empty()) return error.InsertZero;
 
     const add_buf_len = math.cast(
@@ -275,57 +310,8 @@ pub fn insert(
         self._add_buf.items.len,
     ) orelse return error.InsertAddBufFull;
 
-    var cur = self._pieces.cursor();
-    const fr = cur.locate(ins_span.start) orelse {
-        // Past the end of every piece: append fresh.
-        const new_span = try ins_span.moveTo(add_buf_len);
-        try self._add_buf.appendSliceBounded(text);
-        // TODO method on pieces
-        try self._pieces._spans.appendBounded(new_span.withTag(.add));
-        return;
-    };
-
-    // A boundary position (offset 0) resolves to the *following* piece,
-    // so the mergeable candidate is always the piece just before idx,
-    // never pieces[idx] itself.
-    if (fr.offset == 0 and fr.idx > 0) {
-        const prev = self._pieces.get(fr.idx - 1);
-        if (prev.tag == .add and prev.end() == add_buf_len) {
-            const new_len = math.add(
-                Limits.Size,
-                prev.len,
-                ins_span.len,
-            ) catch unreachable;
-
-            try self._add_buf.appendSliceBounded(text);
-            const p = self._pieces.getMut(fr.idx - 1);
-            p.* = try prev.resize(new_len);
-            return;
-        }
-
-        // Boundary, but nothing to merge with: insert before target.
-        try self._add_buf.appendSliceBounded(text);
-
-        const new_span = (try ins_span.moveTo(add_buf_len)).withTag(.add);
-        // TODO method on pieces
-        try self._pieces._spans.insertBounded(fr.idx, new_span);
-        return;
-    }
-
-    // Interior split: 0 < offset < piece.len is guaranteed here.
-    const piece = self._pieces.get(fr.idx);
-    const new_span = try ins_span.moveTo(add_buf_len);
     try self._add_buf.appendSliceBounded(text);
-
-    const replacements = [_]ByteSpan{
-        try piece.resize(fr.offset),
-        new_span.withTag(.add),
-        try piece.advance(fr.offset),
-    };
-
-    // Splitting one piece into up to 3: head, new text, tail.
-    // TODO: method on pieces
-    try self._pieces._spans.replaceRangeBounded(fr.idx, 1, &replacements);
+    try self._pieces.insert(ins_span, add_buf_len);
 }
 
 const Iterator = struct {
