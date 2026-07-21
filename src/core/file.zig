@@ -500,6 +500,18 @@ test "inserting on an empty file results in a single piece" {
     try testing.expectEqualStrings("test", seq.written());
 }
 
+test "typing at end of file should merge into one add-piece" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    var f = try Self.init(a, Limits{}, "hi");
+    try f.insert(2, "a");
+    try f.insert(3, "b");
+
+    try testing.expectEqual(2, f.pieceCount());
+}
+
 test "merge check must compare add-buffer contiguity, not text length" {
     var aa = heap.ArenaAllocator.init(ta);
     defer aa.deinit();
@@ -522,16 +534,4 @@ test "merge check must compare add-buffer contiguity, not text length" {
 
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("PabcdQxyzR", seq.written());
-}
-
-test "typing at end of file should merge into one add-piece" {
-    var aa = heap.ArenaAllocator.init(ta);
-    defer aa.deinit();
-    const a = aa.allocator();
-
-    var f = try Self.init(a, Limits{}, "hi");
-    try f.insert(2, "a");
-    try f.insert(3, "b");
-
-    try testing.expectEqual(2, f.pieceCount());
 }
