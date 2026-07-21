@@ -167,26 +167,31 @@ const Pieces = struct {
         );
     }
 
-    /// `add_buf_len` is the length of the add-buffer *before* the text for
-    /// this insert was appended -- i.e. where the new text now starts.
+    fn insertSingleAdd(self: *Pieces, idx: usize, new_span: ByteSpan) !void {
+        debug.assert(new_span.tag == .add);
+        // Appends are sequential so we can merge in place
+        if (idx > 0) {
+            const prev = self._spans.items[idx - 1];
+            if (prev.tag == .add and prev.end() == new_span.start) {
+                const new_len = math.add(Size, prev.len, new_span.len) catch unreachable;
+                self._spans.items[idx - 1] = try prev.resize(new_len);
+                return;
+            }
+        }
+        try self._spans.insertBounded(idx, new_span);
+    }
+
     fn insert(self: *Pieces, span: ByteSpan, add_buf_len: Size) !void {
         const new_span = try span.moveTo(add_buf_len);
 
         var cur = self.cursor();
         const fr = cur.locate(span.start) orelse {
-            try self._spans.appendBounded(new_span);
+            try self.insertSingleAdd(self._spans.items.len, new_span);
             return;
         };
 
         if (fr.offset == 0 and fr.idx > 0) {
-            const prev = self._spans.items[fr.idx - 1];
-            if (prev.tag == .add and prev.end() == add_buf_len) {
-                const new_len =
-                    math.add(Size, prev.len, span.len) catch unreachable;
-                self._spans.items[fr.idx - 1] = try prev.resize(new_len);
-                return;
-            }
-            try self._spans.insertBounded(fr.idx, new_span);
+            try self.insertSingleAdd(fr.idx, new_span);
             return;
         }
 
@@ -292,6 +297,11 @@ pub fn insert(
 
     try self._pieces.insert(ins_span, add_buf_len);
     try self._add_buf.appendSliceBounded(text);
+}
+
+// Just to keep tests clean and high level
+fn pieceCount(self: Self) usize {
+    return self._pieces._spans.items.len;
 }
 
 const Iterator = struct {
@@ -468,21 +478,13 @@ test "two consecutive inserts should not bloat piecetable" {
     try f.insert(1, "b");
     try f.insert(2, "c");
 
-    try testing.expectEqualSlices(
-        ByteSpan,
-        &[_]ByteSpan{
-            .{ .tag = .original, .start = 0, .len = 1 },
-            .{ .tag = .add, .start = 0, .len = 2 },
-            .{ .tag = .original, .start = 1, .len = 1 },
-        },
-        f._pieces._spans.items,
-    );
+    try testing.expectEqual(3, f.pieceCount());
 
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("abcd", seq.written());
 }
 
-test "inserting on an empty file results in a single span" {
+test "inserting on an empty file results in a single piece" {
     var aa = heap.ArenaAllocator.init(ta);
     defer aa.deinit();
     const a = aa.allocator();
@@ -491,13 +493,7 @@ test "inserting on an empty file results in a single span" {
     var f = try Self.init(a, Limits{}, "");
     try f.insert(0, "test");
 
-    try testing.expectEqualSlices(
-        ByteSpan,
-        &[_]ByteSpan{
-            .{ .tag = .add, .start = 0, .len = 4 },
-        },
-        f._pieces._spans.items,
-    );
+    try testing.expectEqual(1, f.pieceCount());
 
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("test", seq.written());
@@ -518,21 +514,14 @@ test "merge check must compare add-buffer contiguity, not text length" {
     try testing.expectEqualStrings("PabcdQxyzR", seq.written());
 }
 
-//test "typing at end of file should merge into one add-piece" {
-//    var aa = heap.ArenaAllocator.init(ta);
-//    defer aa.deinit();
-//    const a = aa.allocator();
-//
-//    var f = try Self.init(a, Limits{}, "hi");
-//    try f.insert(2, "a");
-//    try f.insert(3, "b");
-//
-//    try testing.expectEqualSlices(
-//        ByteSpan,
-//        &[_]ByteSpan{
-//            .{ .tag = .original, .start = 0, .len = 2 },
-//            .{ .tag = .add, .start = 0, .len = 2 },
-//        },
-//        f._pieces._spans.items,
-//    );
-//}
+test "typing at end of file should merge into one add-piece" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    var f = try Self.init(a, Limits{}, "hi");
+    try f.insert(2, "a");
+    try f.insert(3, "b");
+
+    try testing.expectEqual(2, f.pieceCount());
+}
