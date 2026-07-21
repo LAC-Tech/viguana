@@ -168,12 +168,12 @@ const Pieces = struct {
     }
 
     fn insertSingleAdd(self: *Pieces, idx: usize, new_span: ByteSpan) !void {
-        debug.assert(new_span.tag == .add);
         // Appends are sequential so we can merge in place
         if (idx > 0) {
             const prev = self._spans.items[idx - 1];
             if (prev.tag == .add and prev.end() == new_span.start) {
-                const new_len = math.add(Size, prev.len, new_span.len) catch unreachable;
+                const new_len =
+                    math.add(Size, prev.len, new_span.len) catch unreachable;
                 self._spans.items[idx - 1] = try prev.resize(new_len);
                 return;
             }
@@ -183,6 +183,7 @@ const Pieces = struct {
 
     fn insert(self: *Pieces, span: ByteSpan, add_buf_len: Size) !void {
         const new_span = try span.moveTo(add_buf_len);
+        debug.assert(new_span.tag == .add);
 
         var cur = self.cursor();
         const fr = cur.locate(span.start) orelse {
@@ -506,9 +507,18 @@ test "merge check must compare add-buffer contiguity, not text length" {
     var seq = std.Io.Writer.Allocating.init(a);
 
     var f = try Self.init(a, Limits{}, "PQR");
-    try f.insert(1, "ab"); // -> "PabQR"
-    try f.insert(4, "xyz"); // -> "PabQxyzR"
-    try f.insert(3, "cd"); // insert between "ab" and "Q" -> should be "PabcdQxyzR"
+
+    try f.insert(1, "ab");
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("PabQR", seq.written());
+    seq.clearRetainingCapacity();
+
+    try f.insert(4, "xyz");
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("PabQxyzR", seq.written());
+    seq.clearRetainingCapacity();
+
+    try f.insert(3, "cd");
 
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("PabcdQxyzR", seq.written());
