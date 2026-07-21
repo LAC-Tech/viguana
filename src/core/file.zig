@@ -16,6 +16,7 @@ const ta = testing.allocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;
 const Limits = @import("limits.zig").File;
+const Size = Limits.Size;
 //--------------------------------------------------------------- IMPLEMENTATION
 
 // We treat request to do frivilous things like "delete 0 characters" as errors
@@ -46,28 +47,13 @@ pub const Err = struct {
 const ByteSpan = packed struct(u64) {
     const Tag = enum(u2) { original, add, unset };
 
-    start: Limits.Size,
-    len: Limits.Size,
+    start: Size,
+    len: Size,
     tag: Tag = .unset,
 
-    fn init(start: Limits.Size, len: Limits.Size) Err.ByteSpan!ByteSpan {
-        _ = math.add(
-            Limits.Size,
-            start,
-            len,
-        ) catch return error.ByteSpanTooLong;
-        return .{ .start = start, .len = len };
-    }
-
-    fn withTag(self: ByteSpan, tag: Tag) ByteSpan {
-        var result = self;
-        result.tag = tag;
-        return result;
-    }
-
-    fn initTag(start: Limits.Size, len: Limits.Size, tag: Tag) Err.ByteSpan!ByteSpan {
-        const result = try ByteSpan.init(start, len);
-        return result.withTag(tag);
+    fn init(start: Size, len: Size, tag: Tag) Err.ByteSpan!ByteSpan {
+        _ = math.add(Size, start, len) catch return error.ByteSpanTooLong;
+        return .{ .start = start, .len = len, .tag = tag };
     }
 
     fn empty(self: ByteSpan) bool {
@@ -75,7 +61,7 @@ const ByteSpan = packed struct(u64) {
     }
 
     /// Safe to compute if Range created through init
-    inline fn end(self: ByteSpan) Limits.Size {
+    inline fn end(self: ByteSpan) Size {
         return self.start + self.len;
     }
 
@@ -83,16 +69,20 @@ const ByteSpan = packed struct(u64) {
         return bytes[self.start..self.end()];
     }
 
-    fn resize(self: ByteSpan, new_len: Limits.Size) Err.ByteSpan!ByteSpan {
-        return ByteSpan.initTag(self.start, new_len, self.tag);
+    fn resize(self: ByteSpan, new_len: Size) Err.ByteSpan!ByteSpan {
+        return ByteSpan.init(self.start, new_len, self.tag);
     }
 
-    fn advance(self: ByteSpan, offset: Limits.Size) Err.ByteSpan!ByteSpan {
-        return ByteSpan.initTag(self.start + offset, self.len - offset, self.tag);
+    fn advance(self: ByteSpan, offset: Size) Err.ByteSpan!ByteSpan {
+        return ByteSpan.init(
+            self.start + offset,
+            self.len - offset,
+            self.tag,
+        );
     }
 
-    fn moveTo(self: ByteSpan, new_start: Limits.Size) Err.ByteSpan!ByteSpan {
-        return ByteSpan.initTag(new_start, self.len, self.tag);
+    fn moveTo(self: ByteSpan, new_start: Size) Err.ByteSpan!ByteSpan {
+        return ByteSpan.init(new_start, self.len, self.tag);
     }
 };
 
@@ -106,11 +96,11 @@ const Pieces = struct {
     const Cursor = struct {
         pieces: []const ByteSpan,
         idx: usize = 0,
-        pos: Limits.Size = 0,
+        pos: Size = 0,
 
-        const Result = struct { idx: usize, offset: Limits.Size };
+        const Result = struct { idx: usize, offset: Size };
 
-        fn locate(self: *Cursor, target: Limits.Size) ?Result {
+        fn locate(self: *Cursor, target: Size) ?Result {
             while (self.idx < self.pieces.len and
                 self.pos + self.pieces[self.idx].len <= target)
             {
@@ -124,18 +114,20 @@ const Pieces = struct {
 
     fn init(
         a: mem.Allocator,
-        capacity: Limits.Size,
-        file_buf_len: Limits.Size,
+        capacity: Size,
+        file_buf_len: Size,
     ) !Pieces {
         var spans = try ArrayList(ByteSpan).initCapacity(a, capacity);
 
         const initial_span =
-            if (ByteSpan.init(0, file_buf_len)) |bs| bs else |err| switch (err) {
-                error.ByteSpanTooLong => return error.OriginalFileTooLarge,
+            if (ByteSpan.init(0, file_buf_len, .original)) |bs| bs else |err| {
+                switch (err) {
+                    error.ByteSpanTooLong => return error.OriginalFileTooLarge,
+                }
             };
 
         if (!initial_span.empty()) {
-            try spans.appendBounded(initial_span.withTag(.original));
+            try spans.appendBounded(initial_span);
         }
 
         return .{ ._spans = spans };
@@ -177,8 +169,8 @@ const Pieces = struct {
 
     /// `add_buf_len` is the length of the add-buffer *before* the text for
     /// this insert was appended -- i.e. where the new text now starts.
-    fn insert(self: *Pieces, span: ByteSpan, add_buf_len: Limits.Size) !void {
-        const new_span = (try span.moveTo(add_buf_len)).withTag(.add);
+    fn insert(self: *Pieces, span: ByteSpan, add_buf_len: Size) !void {
+        const new_span = try span.moveTo(add_buf_len);
 
         var cur = self.cursor();
         const fr = cur.locate(span.start) orelse {
@@ -189,11 +181,8 @@ const Pieces = struct {
         if (fr.offset == 0 and fr.idx > 0) {
             const prev = self._spans.items[fr.idx - 1];
             if (prev.tag == .add and prev.end() == new_span.len) {
-                const new_len = math.add(
-                    Limits.Size,
-                    prev.len,
-                    span.len,
-                ) catch unreachable;
+                const new_len =
+                    math.add(Size, prev.len, span.len) catch unreachable;
                 self._spans.items[fr.idx - 1] = try prev.resize(new_len);
                 return;
             }
@@ -231,10 +220,8 @@ pub fn init(
     limits: Limits,
     file_buf: []const u8,
 ) (Err.Init || Err.Alloc)!Self {
-    const file_buf_len = math.cast(
-        Limits.Size,
-        file_buf.len,
-    ) orelse return error.OriginalFileTooLarge;
+    const file_buf_len =
+        math.cast(Size, file_buf.len) orelse return error.OriginalFileTooLarge;
 
     return .{
         ._file_buf = file_buf,
@@ -271,11 +258,15 @@ fn writeSequence(self: *const Self, w: *Io.Writer) Io.Writer.Error!void {
 
 pub fn delete(
     self: *Self,
-    start: Limits.Size,
-    len: Limits.Size,
+    start: Size,
+    len: Size,
 ) (Err.Delete || Err.ByteSpan || Err.Alloc)!void {
-    const del_span = ByteSpan.init(start, len) catch |err| switch (err) {
-        error.ByteSpanTooLong => return err,
+    const del_span = ByteSpan.init(
+        start,
+        len,
+        .unset,
+    ) catch |err| switch (err) {
+        error.ByteSpanTooLong => return error.DeleteTooLong,
     };
     if (del_span.empty()) return error.DeleteZero;
 
@@ -284,23 +275,23 @@ pub fn delete(
 
 pub fn insert(
     self: *Self,
-    pos: Limits.Size,
+    pos: Size,
     text: []const u8,
 ) (Err.Insert || Err.ByteSpan || Err.Alloc)!void {
     const text_len =
-        math.cast(Limits.Size, text.len) orelse return error.InsertTooLong;
-    const ins_span = ByteSpan.init(pos, text_len) catch |err| switch (err) {
-        else => return err,
+        math.cast(Size, text.len) orelse return error.InsertTooLong;
+    const ins_span = ByteSpan.init(pos, text_len, .add) catch |err| switch (err) {
+        error.ByteSpanTooLong => return error.InsertTooLong,
     };
     if (ins_span.empty()) return error.InsertZero;
 
     const add_buf_len = math.cast(
-        Limits.Size,
+        Size,
         self._add_buf.items.len,
     ) orelse return error.InsertAddBufFull;
 
-    try self._add_buf.appendSliceBounded(text);
     try self._pieces.insert(ins_span, add_buf_len);
+    try self._add_buf.appendSliceBounded(text);
 }
 
 const Iterator = struct {
@@ -385,7 +376,7 @@ test "deleting past end of file is invalid" {
     var f = try Self.init(a, Limits{}, "hi");
 
     try testing.expectError(
-        error.ByteSpanTooLong,
+        error.DeleteTooLong,
         f.delete(2_000_000_000, 2_000_000_000),
     );
 }
@@ -439,7 +430,7 @@ test "initialises on max size file size" {
     defer aa.deinit();
     const a = aa.allocator();
 
-    const original_file = try a.alloc(u8, math.maxInt(Limits.Size));
+    const original_file = try a.alloc(u8, math.maxInt(Size));
     _ = try Self.init(a, Limits{}, original_file);
 }
 
@@ -448,7 +439,7 @@ test "gracefully errors if file is too large" {
     defer aa.deinit();
     const a = aa.allocator();
 
-    const original_file = try a.alloc(u8, math.maxInt(Limits.Size) + 1);
+    const original_file = try a.alloc(u8, math.maxInt(Size) + 1);
     try testing.expectError(
         error.OriginalFileTooLarge,
         Self.init(a, Limits{}, original_file),
