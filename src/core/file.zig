@@ -75,8 +75,8 @@ const ByteSpan = packed struct(u64) {
 
     fn advance(self: ByteSpan, offset: Size) Err.ByteSpan!ByteSpan {
         return ByteSpan.init(
-            self.start + offset,
-            self.len - offset,
+            math.add(Size, self.start, offset) catch unreachable,
+            math.sub(Size, self.len, offset) catch unreachable,
             self.tag,
         );
     }
@@ -101,8 +101,8 @@ const Pieces = struct {
         const Result = struct { idx: usize, offset: Size };
 
         fn locate(self: *Cursor, target: Size) ?Result {
-            while (self.idx < self.pieces.len and
-                self.pos + self.pieces[self.idx].len <= target)
+            while (self.pieces.len > self.idx and
+                target >= self.pos + self.pieces[self.idx].len)
             {
                 self.pos += self.pieces[self.idx].len;
                 self.idx += 1;
@@ -167,18 +167,19 @@ const Pieces = struct {
         );
     }
 
-    fn insertSingleAdd(self: *Pieces, idx: usize, new_span: ByteSpan) !void {
-        // Appends are sequential so we can merge in place
+    // Appends are sequential so we can merge in place
+    fn insertSingleAdd(self: *Pieces, idx: usize, span: ByteSpan) !void {
         if (idx > 0) {
             const prev = self._spans.items[idx - 1];
-            if (prev.tag == .add and prev.end() == new_span.start) {
+            if (prev.tag == .add and prev.end() == span.start) {
+                // If two add spans exceed `Size`, then add_buf is too big anyway
                 const new_len =
-                    math.add(Size, prev.len, new_span.len) catch unreachable;
+                    math.add(Size, prev.len, span.len) catch unreachable;
                 self._spans.items[idx - 1] = try prev.resize(new_len);
                 return;
             }
         }
-        try self._spans.insertBounded(idx, new_span);
+        try self._spans.insertBounded(idx, span);
     }
 
     fn insert(self: *Pieces, span: ByteSpan, add_buf_len: Size) !void {
