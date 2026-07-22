@@ -60,7 +60,7 @@ const ByteSpan = packed struct(u64) {
         return self.len == 0;
     }
 
-    /// Safe to compute if Range created through init
+    /// Safe to compute if created through init
     inline fn end(self: ByteSpan) Size {
         return self.start + self.len;
     }
@@ -297,12 +297,10 @@ pub fn insert(
     ) orelse return error.InsertAddBufFull;
 
     try self._add_buf.appendSliceBounded(text);
-    self._pieces.insert(ins_span, add_buf_len) catch |err| switch (err) {
-        else => {
-            // Undo previous text append, to make inserts atomic
-            self._add_buf.items.len = add_buf_len;
-            return err;
-        },
+    self._pieces.insert(ins_span, add_buf_len) catch |err| {
+        // Undo previous text append, to make inserts atomic
+        self._add_buf.items.len = add_buf_len;
+        return err;
     };
 }
 
