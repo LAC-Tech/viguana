@@ -191,7 +191,7 @@ const Pieces = struct {
             return;
         };
 
-        if (fr.offset == 0 and fr.idx > 0) {
+        if (fr.offset == 0) {
             try self.insertSingleAdd(fr.idx, new_span);
             return;
         }
@@ -296,15 +296,24 @@ pub fn insert(
         self._add_buf.items.len,
     ) orelse return error.InsertAddBufFull;
 
-    try self._pieces.insert(ins_span, add_buf_len);
     try self._add_buf.appendSliceBounded(text);
+    self._pieces.insert(ins_span, add_buf_len) catch |err| switch (err) {
+        else => {
+            // Undo previous text append, to make inserts atomic
+            self._add_buf.items.len = add_buf_len;
+            return err;
+        },
+    };
 }
 
-const Stats = struct { piece_count: usize };
+const Stats = struct { piece_count: usize, added_bytes: usize };
 
 // Just to keep tests clean and high level
 fn stats(self: Self) Stats {
-    return .{ .piece_count = self._pieces._spans.items.len };
+    return .{
+        .piece_count = self._pieces._spans.items.len,
+        .added_bytes = self._add_buf.items.len,
+    };
 }
 
 const Iterator = struct {
@@ -514,6 +523,22 @@ test "typing at end of file should merge into one add-piece" {
     try testing.expectEqual(2, f.stats().piece_count);
 }
 
+test "failed append to an empty file does not modify it" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    const limits = Limits{
+        .new_chars_until_swap_write = 3,
+        .edits_until_swap_write = 10,
+    };
+    var f = try Self.init(a, limits, "");
+
+    const before = f.stats();
+    try testing.expectError(error.OutOfMemory, f.insert(0, "test"));
+    try testing.expectEqual(before, f.stats());
+}
+
 test "merge check must compare add-buffer contiguity, not text length" {
     var aa = heap.ArenaAllocator.init(ta);
     defer aa.deinit();
@@ -536,4 +561,22 @@ test "merge check must compare add-buffer contiguity, not text length" {
 
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("PabcdQxyzR", seq.written());
+}
+
+test "inserting at start of non-empty file should not create spurious empty piece" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+    var seq = std.Io.Writer.Allocating.init(a);
+
+    var f = try Self.init(a, Limits{}, "iguana");
+    try f.insert(0, "v");
+
+    try testing.expectEqual(
+        Stats{ .piece_count = 2, .added_bytes = 1 },
+        f.stats(),
+    );
+
+    try f.writeSequence(&seq.writer);
+    try testing.expectEqualStrings("viguana", seq.written());
 }
