@@ -19,7 +19,7 @@ const Limits = @import("limits.zig").File;
 const Size = Limits.Size;
 //--------------------------------------------------------------- IMPLEMENTATION
 
-// We treat request to do frivilous things like "delete 0 characters" as errors
+// We treat request to do frivolous things like "delete 0 characters" as errors
 // Silently doing nothing hides bugs - why is the caller sending bad data?
 pub const Err = struct {
     pub const Init = error{
@@ -29,19 +29,19 @@ pub const Err = struct {
     const Delete = error{
         DeleteZero,
         DeleteTooLong,
+        DeletePieceTableFull,
     };
 
     const Insert = error{
         InsertZero,
         InsertTooLong,
         InsertAddBufFull,
+        InsertPieceTableFull,
     };
 
     const ByteSpan = error{
         ByteSpanTooLong,
     };
-
-    const Alloc = mem.Allocator.Error;
 };
 
 const ByteSpan = packed struct(u64) {
@@ -142,8 +142,8 @@ const Pieces = struct {
         const last_pos = span.end() - 1;
 
         var cur = self.cursor();
-        const first = cur.locate(span.start) orelse return error.DeleteTooLong;
-        const last = cur.locate(last_pos) orelse return error.DeleteTooLong;
+        const first = cur.locate(span.start) orelse return error.ByteSpanTooLong;
+        const last = cur.locate(last_pos) orelse return error.ByteSpanTooLong;
 
         var replacements: [2]ByteSpan = undefined;
         var n: usize = 0;
@@ -214,18 +214,16 @@ _file_buf: []const u8,
 _add_buf: ArrayList(u8),
 _pieces: Pieces,
 
-const n_initial_pieces = 1;
-
 pub fn memory_needed(limits: Limits) usize {
     return (limits.new_chars_until_swap_write * @sizeOf(u8)) +
-        ((limits.edits_until_swap_write + n_initial_pieces) * @sizeOf(ByteSpan));
+        (limits.edits_until_swap_write * @sizeOf(ByteSpan));
 }
 
 pub fn init(
     a: mem.Allocator,
     limits: Limits,
     file_buf: []const u8,
-) (Err.Init || Err.Alloc)!Self {
+) (Err.Init || mem.Allocator.Error)!Self {
     const file_buf_len =
         math.cast(Size, file_buf.len) orelse return error.OriginalFileTooLarge;
 
@@ -237,7 +235,7 @@ pub fn init(
         ),
         ._pieces = try Pieces.init(
             a,
-            limits.edits_until_swap_write + n_initial_pieces,
+            limits.edits_until_swap_write,
             file_buf_len,
         ),
     };
@@ -262,11 +260,7 @@ fn writeSequence(self: *const Self, w: *Io.Writer) Io.Writer.Error!void {
     }
 }
 
-pub fn delete(
-    self: *Self,
-    start: Size,
-    len: Size,
-) (Err.Delete || Err.ByteSpan || Err.Alloc)!void {
+pub fn delete(self: *Self, start: Size, len: Size) Err.Delete!void {
     const del_span = ByteSpan.init(
         start,
         len,
@@ -276,31 +270,38 @@ pub fn delete(
     };
     if (del_span.empty()) return error.DeleteZero;
 
-    try self._pieces.delete(del_span);
+    return self._pieces.delete(del_span) catch |err| switch (err) {
+        error.OutOfMemory => error.DeletePieceTableFull,
+        error.ByteSpanTooLong => error.DeleteTooLong,
+    };
 }
 
-pub fn insert(
-    self: *Self,
-    pos: Size,
-    text: []const u8,
-) (Err.Insert || Err.ByteSpan || Err.Alloc)!void {
+pub fn insert(self: *Self, pos: Size, text: []const u8) Err.Insert!void {
     const text_len =
         math.cast(Size, text.len) orelse return error.InsertTooLong;
-    const ins_span = ByteSpan.init(pos, text_len, .add) catch |err| switch (err) {
-        error.ByteSpanTooLong => return error.InsertTooLong,
+    const ins_span = ByteSpan.init(pos, text_len, .add) catch |err| {
+        switch (err) {
+            error.ByteSpanTooLong => return error.InsertTooLong,
+        }
     };
     if (ins_span.empty()) return error.InsertZero;
 
     const add_buf_len = math.cast(
         Size,
         self._add_buf.items.len,
-    ) orelse return error.InsertAddBufFull;
+    ) orelse unreachable; // the capacity of this buf is a Size; can't be larger
 
-    try self._add_buf.appendSliceBounded(text);
+    self._add_buf.appendSliceBounded(text) catch |err| switch (err) {
+        error.OutOfMemory => return error.InsertAddBufFull,
+    };
+
     self._pieces.insert(ins_span, add_buf_len) catch |err| {
         // Undo previous text append, to make inserts atomic
         self._add_buf.items.len = add_buf_len;
-        return err;
+        return switch (err) {
+            error.ByteSpanTooLong => error.InsertAddBufFull,
+            error.OutOfMemory => error.InsertPieceTableFull,
+        };
     };
 }
 
@@ -521,7 +522,7 @@ test "typing at end of file should merge into one add-piece" {
     try testing.expectEqual(2, f.stats().piece_count);
 }
 
-test "failed append to an empty file does not modify it" {
+test "failed append to an empty file does not modify it (new chars)" {
     var aa = heap.ArenaAllocator.init(ta);
     defer aa.deinit();
     const a = aa.allocator();
@@ -533,7 +534,23 @@ test "failed append to an empty file does not modify it" {
     var f = try Self.init(a, limits, "");
 
     const before = f.stats();
-    try testing.expectError(error.OutOfMemory, f.insert(0, "test"));
+    try testing.expectError(error.InsertAddBufFull, f.insert(0, "test"));
+    try testing.expectEqual(before, f.stats());
+}
+
+test "failed append to an empty file does not modify it (edits)" {
+    var aa = heap.ArenaAllocator.init(ta);
+    defer aa.deinit();
+    const a = aa.allocator();
+
+    const limits = Limits{
+        .new_chars_until_swap_write = 32,
+        .edits_until_swap_write = 0,
+    };
+    var f = try Self.init(a, limits, "");
+
+    const before = f.stats();
+    try testing.expectError(error.InsertPieceTableFull, f.insert(0, "test"));
     try testing.expectEqual(before, f.stats());
 }
 
