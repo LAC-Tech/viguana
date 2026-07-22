@@ -300,9 +300,11 @@ pub fn insert(
     try self._add_buf.appendSliceBounded(text);
 }
 
+const Stats = struct { piece_count: usize };
+
 // Just to keep tests clean and high level
-fn pieceCount(self: Self) usize {
-    return self._pieces._spans.items.len;
+fn stats(self: Self) Stats {
+    return .{ .piece_count = self._pieces._spans.items.len };
 }
 
 const Iterator = struct {
@@ -479,7 +481,7 @@ test "two consecutive inserts should not bloat piecetable" {
     try f.insert(1, "b");
     try f.insert(2, "c");
 
-    try testing.expectEqual(3, f.pieceCount());
+    try testing.expectEqual(3, f.stats().piece_count);
 
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("abcd", seq.written());
@@ -494,7 +496,7 @@ test "inserting on an empty file results in a single piece" {
     var f = try Self.init(a, Limits{}, "");
     try f.insert(0, "test");
 
-    try testing.expectEqual(1, f.pieceCount());
+    try testing.expectEqual(1, f.stats().piece_count);
 
     try f.writeSequence(&seq.writer);
     try testing.expectEqualStrings("test", seq.written());
@@ -509,7 +511,7 @@ test "typing at end of file should merge into one add-piece" {
     try f.insert(2, "a");
     try f.insert(3, "b");
 
-    try testing.expectEqual(2, f.pieceCount());
+    try testing.expectEqual(2, f.stats().piece_count);
 }
 
 test "merge check must compare add-buffer contiguity, not text length" {
